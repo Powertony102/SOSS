@@ -60,6 +60,9 @@ parser.add_argument('--memory_num', type=int, default=256, help='num of embeddin
 parser.add_argument('--embedding_dim', type=int, default=64, help='dim of embeddings to calculate similarity')
 parser.add_argument('--num_filtered', type=int, default=12800,
                     help='num of unlabeled embeddings to calculate similarity')
+parser.add_argument('--cov_mode', type=str, default='patch', choices=['full', 'patch'],
+                    help='covariance computation mode: full or patch')
+parser.add_argument('--patch_size', type=int, default=4, help='patch size for patch-wise covariance')
 args = parser.parse_args()
 
 snapshot_path = "./model/LA_{}_{}_memory{}_feat{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}/{}".format(
@@ -261,21 +264,27 @@ if __name__ == "__main__":
             # get fv's correlation matrix
             projected_feature_v = model.projection_head1(unlabeled_features_v)
             predicted_feature_v = model.prediction_head1(projected_feature_v)
-            corr_v, corr_v_available = new_correlation_CORAL.cal_coral_correlation(predicted_feature_v,
+            corr_v, corr_v_available = new_correlation_CORAL.cal_coral_correlation(
+                                                                          predicted_feature_v,
                                                                           consist_unlabel_prob,
                                                                           consist_unlabel,
                                                                           memory,
                                                                           num_classes,
+                                                                          cov_mode=args.cov_mode,
+                                                                          patch_size=args.patch_size,
                                                                           num_filtered=args.num_filtered)
 
             # get fa's correlation matrix
             projected_feature_a = model.projection_head2(unlabeled_features_a)
             predicted_feature_a = model.prediction_head2(projected_feature_a)
-            corr_a, corr_a_available = new_correlation_CORAL.cal_coral_correlation(predicted_feature_a,
+            corr_a, corr_a_available = new_correlation_CORAL.cal_coral_correlation(
+                                                                          predicted_feature_a,
                                                                           consist_unlabel_prob,
                                                                           consist_unlabel,
                                                                           memory,
                                                                           num_classes,
+                                                                          cov_mode=args.cov_mode,
+                                                                          patch_size=args.patch_size,
                                                                           num_filtered=args.num_filtered)
 
             # print(f"{corr_a_available}")

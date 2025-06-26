@@ -1,6 +1,9 @@
 import torch
 import numpy as np
 
+# Local utilities for efficient covariance computation
+from myutils.covariance_utils import compute_covariance, patchwise_covariance
+
 def coral_loss(source, target):
     """
     计算 CORAL 损失：源和目标特征协方差矩阵的 Frobenius 范数差异
@@ -10,7 +13,15 @@ def coral_loss(source, target):
     loss = torch.norm(source - target, p='fro') ** 2 / (4 * d * d)
     return loss
 
-def cal_coral_correlation(features, prob, label, memory, num_classes, temperature=0.1, num_filtered=64):
+def cal_coral_correlation(features,
+                          prob,
+                          label,
+                          memory,
+                          num_classes,
+                          cov_mode: str = 'full',
+                          patch_size: int = 4,
+                          temperature: float = 0.1,
+                          num_filtered: int = 64):
     correlation_list = []
 
     for i in range(num_classes):
@@ -36,22 +47,18 @@ def cal_coral_correlation(features, prob, label, memory, num_classes, temperatur
             if memory_c is not None and selected_features.shape[0] > 1 and memory_c.shape[0] > 1:
                 memory_c_tensor = torch.from_numpy(memory_c).cuda() if isinstance(memory_c, np.ndarray) else memory_c
 
-                """
-                I = torch.ones(selected_features.shape[0])
-                n_s = selected_features.shape[0] - 1
-                source_cov = (torch.matmul(selected_features.T, selected_features) - 
-                            torch.matmul(torch.matmul(I, selected_features).T, torch.matmul(I.T, selected_features)) / n_s) / (n_s - 1)
-                # source_cov = torch.matmul(selected_features.T, selected_features) / (selected_features.shape[0] - 1)
-                # target_cov = torch.matmul(memory_c_tensor.T, memory_c_tensor) / (memory_c_tensor.shape[0] - 1)
-                n_t = memory_c_tensor.shape[0]
-                target_cov = (torch.matmul(memory_c_tensor.T, memory_c_tensor) - 
-                            torch.matmul(torch.matmul(I, memory_c_tensor).T, torch.matmul(I.T, memory_c_tensor)) / n_t) / (n_t - 1)
+                # 根据配置计算协方差矩阵
+                if cov_mode == 'patch' and selected_features.dim() > 2:
+                    # If spatial dimensions are retained, use patch-wise covariance
+                    source_cov = patchwise_covariance(selected_features, patch_size)
+                else:
+                    # Fallback to full covariance on flattened features
+                    source_cov = compute_covariance(selected_features)
 
-                covariance_diff = coral_loss(source_cov, target_cov)
-                """
-                # 使用 torch.cov 计算协方差矩阵
-                source_cov = torch.cov(selected_features.T)
-                target_cov = torch.cov(memory_c_tensor.T)
+                if cov_mode == 'patch' and memory_c_tensor.dim() > 2:
+                    target_cov = patchwise_covariance(memory_c_tensor, patch_size)
+                else:
+                    target_cov = compute_covariance(memory_c_tensor)
 
                 # 计算CORAL损失
                 covariance_diff = coral_loss(source_cov, target_cov)
