@@ -144,7 +144,7 @@ def var_all_case(model, num_classes, patch_size=(112, 112, 80), stride_xy=18, st
         image = h5f['image'][:]
         label = h5f['label'][:]
         prediction, score_map = test_single_case_first_output(model, image, stride_xy, stride_z, patch_size, num_classes=num_classes)
-        # 将 prediction 和 label 转换为布尔类型
+        # Convert prediction and label to boolean type
         prediction_bool = prediction.astype(np.bool_)
         label_bool = label.astype(np.bool_)
     

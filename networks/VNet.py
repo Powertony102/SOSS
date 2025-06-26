@@ -274,10 +274,14 @@ class corf(nn.Module):
             nn.Linear(feat_dim, feat_dim)
         )
 
-    def forward(self, input):
+    def forward(self, input, with_hcc=False):
         features1 = self.encoder1(input)
         features2 = self.encoder2(input)
         out_seg1, embedding1 = self.decoder1(features1, with_feature=True)
         out_seg2, embedding2 = self.decoder2(features2, with_feature=True)
-        return out_seg1, out_seg2, embedding1, embedding2
+        
+        if with_hcc:
+            return out_seg1, out_seg2, embedding1, embedding2, features1, features2
+        else:
+            return out_seg1, out_seg2, embedding1, embedding2
     

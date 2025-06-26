@@ -15,6 +15,7 @@ from torchvision import transforms
 
 from myutils import ramps, losses, test_patch, dynamic_feature_pool
 from myutils import new_correlation_CORAL
+from myutils.hcc_loss import hierarchical_coral, parse_hcc_weights
 from dataloaders.dataset import *
 from networks.net_factory import net_factory
 
@@ -64,10 +65,15 @@ parser.add_argument('--num_filtered', type=int, default=12800,
 parser.add_argument('--cov_mode', type=str, default='patch', choices=['full', 'patch'],
                     help='covariance computation mode: full or patch')
 parser.add_argument('--patch_size', type=int, default=4, help='patch size for patch-wise covariance')
+parser.add_argument('--lambda_hcc', type=float, default=0.1, help='weight of hierarchical covariance consistency loss')
+parser.add_argument('--hcc_weights', type=str, default='0.5,0.5,1,1,1.5', help='comma separated weights for 5 encoder layers')
 parser.add_argument('--use_wandb', action='store_true', help='whether to use wandb for logging')
 parser.add_argument('--wandb_project', type=str, default='corn-medical', help='wandb project name')
 parser.add_argument('--wandb_entity', type=str, default=None, help='wandb entity name')
 args = parser.parse_args()
+
+# Parse HCC weights
+hcc_weights = parse_hcc_weights(args.hcc_weights, num_layers=5)
 
 snapshot_path = "./model/LA_{}_{}_memory{}_feat{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}/{}".format(
     args.exp,
@@ -175,7 +181,7 @@ if __name__ == "__main__":
             volume_batch, label_batch, idx = volume_batch.cuda(), label_batch.cuda(), idx.cuda()
 
             model.train()
-            outputs_v, outputs_a, embedding_v, embedding_a = model(volume_batch)
+            outputs_v, outputs_a, embedding_v, embedding_a, features_v, features_a = model(volume_batch, with_hcc=True)
             outputs_list = [outputs_v, outputs_a]
             num_outputs = len(outputs_list)
 
@@ -198,6 +204,10 @@ if __name__ == "__main__":
                 for j in range(num_outputs):
                     if i != j:
                         loss_c += consistency_criterion(y_ori[i], y_pseudo_label[j])
+
+            # Calculate Hierarchical Covariance Consistency (HCC) Loss
+            loss_hcc = hierarchical_coral(features_v, features_a, hcc_weights,
+                                        cov_mode=args.cov_mode, patch_size=args.patch_size)
 
             # print(f"outputs_v shape:{outputs_v.shape}"  + "\n"  )
             # print(f"embedding_v shape:{embedding_v.shape}"  + "\n" )
@@ -316,13 +326,13 @@ if __name__ == "__main__":
             lambda_c = get_lambda_c(iter_num // 150)
             lambda_d = get_lambda_d(iter_num // 150)
 
-            loss = args.lamda * loss_s + lambda_c * loss_c + lambda_d * loss_d
+            loss = args.lamda * loss_s + lambda_c * loss_c + lambda_d * loss_d + args.lambda_hcc * loss_hcc
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            logging.info('iteration %d : loss : %03f, loss_s: %03f, loss_c: %03f, loss_d: %03f' % (
-                iter_num, loss, loss_s, loss_c, loss_d))
+            logging.info('iteration %d : loss : %03f, loss_s: %03f, loss_c: %03f, loss_d: %03f, loss_hcc: %03f' % (
+                iter_num, loss, loss_s, loss_c, loss_d, loss_hcc))
 
             # Log metrics
             if args.use_wandb:
@@ -331,8 +341,10 @@ if __name__ == "__main__":
                     'train/loss_supervised': loss_s.item(),
                     'train/loss_consistency': loss_c.item(),
                     'train/loss_coral': loss_d.item(),
+                    'train/loss_hcc': loss_hcc.item(),
                     'train/lambda_c': lambda_c,
                     'train/lambda_d': lambda_d,
+                    'train/lambda_hcc': args.lambda_hcc,
                     'train/learning_rate': optimizer.param_groups[0]['lr'],
                     'iteration': iter_num
                 })
@@ -340,6 +352,7 @@ if __name__ == "__main__":
                 writer.add_scalar('Labeled_loss/loss_s', loss_s, iter_num)
                 writer.add_scalar('Co_loss/loss_c', loss_c, iter_num)
                 writer.add_scalar('Co_loss/loss_d', loss_d, iter_num)
+                writer.add_scalar('HCC_loss/loss_hcc', loss_hcc, iter_num)
 
             if iter_num >= 1000 and iter_num % 500 == 0:
                 model.eval()

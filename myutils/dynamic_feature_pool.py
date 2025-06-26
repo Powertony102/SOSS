@@ -37,15 +37,15 @@ class DynamicFeaturePool:
             features_c = tmp_feature_list[mask_c]
             if features_c.shape[0] >= num_sampled_per_cls:
                 num_features = features_c.shape[0]
-                # 选择置信度高的部分样本
+                # Choose high confidence samples
                 high_conf_indices = random.sample(range(num_features), num_sampled_per_cls // 2)
                 high_conf_features = features_c[high_conf_indices]
 
-                # 随机选择一些置信度较低的样本
+                # Choose low confidence samples
                 low_conf_indices = random.sample(range(num_features), num_sampled_per_cls // 2)
                 low_conf_features = features_c[low_conf_indices]
 
-                # 合并高置信度和低置信度样本
+                # Merge high confidence and low confidence samples
                 selected_features = np.concatenate((high_conf_features, low_conf_features), axis=0)
                 selected_feature_list.append(selected_features)
             else:
@@ -71,17 +71,17 @@ def sample_labeled_features_from_both_memory_bank(memory_a, memory_b, num_sample
         features_b = tmp_feature_list_b[mask_c]
         if features_a.shape[0] >= num_sampled_per_cls:
             num_features = features_a.shape[0]
-            # 选择置信度高的部分样本
+            # Choose high confidence samples
             high_conf_indices = random.sample(range(num_features), num_sampled_per_cls // 2)
             high_conf_features_a = features_a[high_conf_indices]
             high_conf_features_b = features_b[high_conf_indices]
 
-            # 随机选择一些置信度较低的样本
+            # Choose low confidence samples
             low_conf_indices = random.sample(range(num_features), num_sampled_per_cls // 2)
             low_conf_features_a = features_a[low_conf_indices]
             low_conf_features_b = features_b[low_conf_indices]
 
-            # 合并高置信度和低置信度样本
+            # Merge high confidence and low confidence samples
             selected_features_a = np.concatenate((high_conf_features_a, low_conf_features_a), axis=0)
             selected_features_b = np.concatenate((high_conf_features_b, low_conf_features_b), axis=0)
 

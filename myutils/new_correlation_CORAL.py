@@ -6,9 +6,9 @@ from myutils.covariance_utils import compute_covariance, patchwise_covariance
 
 def coral_loss(source, target):
     """
-    计算 CORAL 损失：源和目标特征协方差矩阵的 Frobenius 范数差异
+    Calculate CORAL loss: the Frobenius norm difference between the source and target feature covariance matrices
     """
-    # 计算Frobenius范数的平方
+    # Calculate the square of the Frobenius norm
     d = source.size(1)
     loss = torch.norm(source - target, p='fro') ** 2 / (4 * d * d)
     return loss
@@ -30,16 +30,16 @@ def cal_coral_correlation(features,
         class_prob = prob[class_mask]
         
         
-        # 选择置信度最高的部分特征
+        # Choose high confidence features
         _, high_conf_indices = torch.sort(class_prob, descending=True)
         high_conf_indices = high_conf_indices[:num_filtered // 4]
         high_conf_features = class_feature[high_conf_indices]
         
-        # 随机选择一些置信度较低的特征
+        # Choose low confidence features
         low_conf_indices = torch.sort(class_prob, descending=False)[1][:num_filtered // 4]
         low_conf_features = class_feature[low_conf_indices]
 
-        # 合并高置信度和低置信度特征
+        # Merge high confidence and low confidence features
         selected_features = torch.cat((high_conf_features, low_conf_features), dim=0)
 
         logits_list = []
@@ -47,7 +47,7 @@ def cal_coral_correlation(features,
             if memory_c is not None and selected_features.shape[0] > 1 and memory_c.shape[0] > 1:
                 memory_c_tensor = torch.from_numpy(memory_c).cuda() if isinstance(memory_c, np.ndarray) else memory_c
 
-                # 根据配置计算协方差矩阵
+                # Calculate covariance matrix based on configuration
                 if cov_mode == 'patch' and selected_features.dim() > 2:
                     # If spatial dimensions are retained, use patch-wise covariance
                     source_cov = patchwise_covariance(selected_features, patch_size)
@@ -60,7 +60,7 @@ def cal_coral_correlation(features,
                 else:
                     target_cov = compute_covariance(memory_c_tensor)
 
-                # 计算CORAL损失
+                # Calculate CORAL loss
                 covariance_diff = coral_loss(source_cov, target_cov)
                 # correlation_score = 1 / (1 + covariance_diff)
                 # logits_list.append(correlation_score)
@@ -75,5 +75,5 @@ def cal_coral_correlation(features,
     if not correlation_list:
         return [], False
     else:
-        correlation_list = torch.stack(correlation_list)  # 确保返回的结果是一个二维张量
+        correlation_list = torch.stack(correlation_list)  # Ensure the result is a 2D tensor
         return correlation_list, True
