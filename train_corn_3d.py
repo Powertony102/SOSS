@@ -5,6 +5,7 @@ import argparse
 import logging
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
+import wandb
 
 import torch.optim as optim
 import torch.nn.functional as F
@@ -63,6 +64,9 @@ parser.add_argument('--num_filtered', type=int, default=12800,
 parser.add_argument('--cov_mode', type=str, default='patch', choices=['full', 'patch'],
                     help='covariance computation mode: full or patch')
 parser.add_argument('--patch_size', type=int, default=4, help='patch size for patch-wise covariance')
+parser.add_argument('--use_wandb', action='store_true', help='whether to use wandb for logging')
+parser.add_argument('--wandb_project', type=str, default='corn-medical', help='wandb project name')
+parser.add_argument('--wandb_entity', type=str, default=None, help='wandb entity name')
 args = parser.parse_args()
 
 snapshot_path = "./model/LA_{}_{}_memory{}_feat{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}/{}".format(
@@ -109,6 +113,17 @@ if __name__ == "__main__":
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
 
+    # Initialize wandb if enabled
+    if args.use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            config=vars(args),
+            name=f"{args.exp}_{args.model}_cov_{args.cov_mode}_patch_{args.patch_size}",
+            tags=[args.dataset_name, args.cov_mode, f"patch_{args.patch_size}"]
+        )
+        logging.info(f"Wandb initialized with project: {args.wandb_project}")
+
     model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
 
     dynamic_feature_pool = dynamic_feature_pool.DynamicFeaturePool(num_labeled_samples=args.labelnum, num_cls=num_classes)
@@ -143,7 +158,8 @@ if __name__ == "__main__":
 
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
 
-    writer = SummaryWriter(snapshot_path + '/log')
+    # Initialize tensorboard writer (keep for compatibility)
+    writer = SummaryWriter(snapshot_path + '/log') if not args.use_wandb else None
     logging.info("{} itertations per epoch".format(len(trainloader)))
     consistency_criterion = losses.mse_loss
     dice_loss = losses.Binary_dice_loss
@@ -308,9 +324,22 @@ if __name__ == "__main__":
             logging.info('iteration %d : loss : %03f, loss_s: %03f, loss_c: %03f, loss_d: %03f' % (
                 iter_num, loss, loss_s, loss_c, loss_d))
 
-            writer.add_scalar('Labeled_loss/loss_s', loss_s, iter_num)
-            writer.add_scalar('Co_loss/loss_c', loss_c, iter_num)
-            writer.add_scalar('Co_loss/loss_d', loss_d, iter_num)
+            # Log metrics
+            if args.use_wandb:
+                wandb.log({
+                    'train/loss': loss.item(),
+                    'train/loss_supervised': loss_s.item(),
+                    'train/loss_consistency': loss_c.item(),
+                    'train/loss_coral': loss_d.item(),
+                    'train/lambda_c': lambda_c,
+                    'train/lambda_d': lambda_d,
+                    'train/learning_rate': optimizer.param_groups[0]['lr'],
+                    'iteration': iter_num
+                })
+            else:
+                writer.add_scalar('Labeled_loss/loss_s', loss_s, iter_num)
+                writer.add_scalar('Co_loss/loss_c', loss_c, iter_num)
+                writer.add_scalar('Co_loss/loss_d', loss_d, iter_num)
 
             if iter_num >= 1000 and iter_num % 500 == 0:
                 model.eval()
@@ -328,8 +357,16 @@ if __name__ == "__main__":
                     torch.save(model.state_dict(), save_mode_path)
                     torch.save(model.state_dict(), save_best_path)
                     logging.info("save best model to {}".format(save_mode_path))
-                writer.add_scalar('Var_dice/Dice', dice_sample, iter_num)
-                writer.add_scalar('Var_dice/Best_dice', best_dice, iter_num)
+                # Log validation metrics
+                if args.use_wandb:
+                    wandb.log({
+                        'val/dice': dice_sample,
+                        'val/best_dice': best_dice,
+                        'iteration': iter_num
+                    })
+                else:
+                    writer.add_scalar('Var_dice/Dice', dice_sample, iter_num)
+                    writer.add_scalar('Var_dice/Best_dice', best_dice, iter_num)
                 model.train()
 
             if iter_num >= max_iterations:
@@ -340,4 +377,8 @@ if __name__ == "__main__":
         if iter_num >= max_iterations:
             iterator.close()
             break
-    writer.close()
+    # Close logging
+    if args.use_wandb:
+        wandb.finish()
+    else:
+        writer.close()
