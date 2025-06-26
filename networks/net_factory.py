@@ -10,8 +10,8 @@ def net_factory(net_type="unet", in_chns=1, class_num=2, mode = "train", **kwarg
     if net_type == "vnet" and mode == "test":
         net = VNet(n_channels=in_chns, n_classes=class_num, normalization='batchnorm', has_dropout=False).cuda()
 
-    elif net_type == "corf" and mode == "train":
+    elif net_type == "corn" and mode == "train":
         net = corf(n_channels=in_chns, n_classes=class_num, normalization='batchnorm', has_dropout=True).cuda()
-    elif net_type == "corf" and mode == "test":
+    elif net_type == "corn" and mode == "test":
         net = corf(n_channels=in_chns, n_classes=class_num, normalization='batchnorm', has_dropout=False).cuda()
     return net
