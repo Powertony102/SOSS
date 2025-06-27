@@ -1,0 +1,7 @@
+Wandb initialized with project: my-corn-project
+Traceback (most recent call last):
+  File "/home/jovyan/work/SOSS/train_corn_3d.py", line 127, in <module>
+    model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
+  File "/home/jovyan/work/SOSS/networks/net_factory.py", line 17, in net_factory
+    return net
+UnboundLocalError: local variable 'net' referenced before assignment

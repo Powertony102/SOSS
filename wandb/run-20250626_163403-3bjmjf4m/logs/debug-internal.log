@@ -1,0 +1,38 @@
+{"time":"2025-06-26T16:34:03.364397398Z","level":"INFO","msg":"stream: starting","core version":"0.20.1","symlink path":"/home/jovyan/work/SOSS/wandb/run-20250626_163403-3bjmjf4m/logs/debug-core.log"}
+{"time":"2025-06-26T16:34:10.042218019Z","level":"INFO","msg":"stream: created new stream","id":"3bjmjf4m"}
+{"time":"2025-06-26T16:34:10.042296929Z","level":"INFO","msg":"stream: started","id":"3bjmjf4m"}
+{"time":"2025-06-26T16:34:10.042283134Z","level":"INFO","msg":"writer: Do: started","stream_id":"3bjmjf4m"}
+{"time":"2025-06-26T16:34:10.042285099Z","level":"INFO","msg":"handler: started","stream_id":"3bjmjf4m"}
+{"time":"2025-06-26T16:34:10.042340358Z","level":"INFO","msg":"sender: started","stream_id":"3bjmjf4m"}
+{"time":"2025-06-26T16:34:10.725488525Z","level":"INFO","msg":"Starting system monitor"}
+{"time":"2025-06-26T16:39:28.092861189Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-26T16:44:41.21625305Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": net/http: request canceled (Client.Timeout exceeded while awaiting headers)"}
+{"time":"2025-06-26T16:45:42.791838969Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": unexpected EOF"}
+{"time":"2025-06-26T17:03:23.914208745Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-26T17:54:24.330404067Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-26T17:54:27.327444771Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-26T18:31:54.327486992Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-26T18:31:58.846093515Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-26T19:14:07.850589583Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-26T19:20:39.329719183Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-26T19:45:07.869518047Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-26T20:22:53.836387104Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-26T21:00:09.148010956Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-26T21:20:09.357930608Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-26T21:20:14.12105466Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-26T22:11:54.361496254Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-26T22:14:20.289737839Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-27T00:02:09.325916197Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-27T00:07:24.328123182Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-27T00:10:08.010343201Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-27T00:28:22.634712091Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-27T01:39:23.757768998Z","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2025-06-27T01:39:23.75786299Z","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2025-06-27T01:39:24.324977803Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"}
+{"time":"2025-06-27T01:39:24.760343169Z","level":"INFO","msg":"handler: operation stats","stats":{"operations":[{"desc":"uploading console lines 15073-15073","runtime_seconds":5.457244282,"error_status":"retrying: Post \"https://api.wandb.ai/files/uic-edu-cn/SOSS/3bjmjf4m/file_stream\": EOF"},{"desc":"uploading output.log","runtime_seconds":0.726858358,"progress":"64.0KB/1.3MB"},{"desc":"uploading wandb-summary.json","runtime_seconds":0.726839194,"progress":"421B/421B"},{"desc":"uploading config.yaml","runtime_seconds":0.442962982,"progress":"1.2KB/1.2KB"}],"total_operations":4}}
+{"time":"2025-06-27T01:39:25.976534479Z","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-06-27T01:39:32.58255761Z","level":"INFO","msg":"stream: closing","id":"3bjmjf4m"}
+{"time":"2025-06-27T01:39:32.582587646Z","level":"INFO","msg":"handler: closed","stream_id":"3bjmjf4m"}
+{"time":"2025-06-27T01:39:32.58260492Z","level":"INFO","msg":"writer: Close: closed","stream_id":"3bjmjf4m"}
+{"time":"2025-06-27T01:39:32.582619423Z","level":"INFO","msg":"sender: closed","stream_id":"3bjmjf4m"}
+{"time":"2025-06-27T01:39:32.58273887Z","level":"INFO","msg":"stream: closed","id":"3bjmjf4m"}

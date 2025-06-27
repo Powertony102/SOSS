@@ -65,7 +65,7 @@ parser.add_argument('--cov_mode', type=str, default='patch', choices=['full', 'p
                     help='covariance computation mode: full or patch')
 parser.add_argument('--patch_size', type=int, default=4, help='patch size for patch-wise covariance')
 parser.add_argument('--use_wandb', action='store_true', help='whether to use wandb for logging')
-parser.add_argument('--wandb_project', type=str, default='corn-medical', help='wandb project name')
+parser.add_argument('--wandb_project', type=str, default='SOSS', help='wandb project name')
 parser.add_argument('--wandb_entity', type=str, default=None, help='wandb entity name')
 args = parser.parse_args()
 
