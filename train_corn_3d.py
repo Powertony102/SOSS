@@ -68,7 +68,7 @@ parser.add_argument('--patch_size', type=int, default=4, help='patch size for pa
 parser.add_argument('--lambda_hcc', type=float, default=0.1, help='weight of hierarchical covariance consistency loss')
 parser.add_argument('--hcc_weights', type=str, default='0.5,0.5,1,1,1.5', help='comma separated weights for 5 encoder layers')
 parser.add_argument('--use_wandb', action='store_true', help='whether to use wandb for logging')
-parser.add_argument('--wandb_project', type=str, default='corn-medical', help='wandb project name')
+parser.add_argument('--wandb_project', type=str, default='SOSS', help='wandb project name')
 parser.add_argument('--wandb_entity', type=str, default=None, help='wandb entity name')
 args = parser.parse_args()
 

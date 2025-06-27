@@ -1,0 +1,12 @@
+{"time":"2025-06-27T03:58:45.645152348Z","level":"INFO","msg":"stream: starting","core version":"0.20.1","symlink path":"/home/jovyan/work/SOSS/wandb/run-20250627_035845-3vptugym/logs/debug-core.log"}
+{"time":"2025-06-27T03:58:50.041012205Z","level":"INFO","msg":"stream: created new stream","id":"3vptugym"}
+{"time":"2025-06-27T03:58:50.041111697Z","level":"INFO","msg":"stream: started","id":"3vptugym"}
+{"time":"2025-06-27T03:58:50.041151154Z","level":"INFO","msg":"writer: Do: started","stream_id":"3vptugym"}
+{"time":"2025-06-27T03:58:50.041141579Z","level":"INFO","msg":"sender: started","stream_id":"3vptugym"}
+{"time":"2025-06-27T03:58:50.041166744Z","level":"INFO","msg":"handler: started","stream_id":"3vptugym"}
+{"time":"2025-06-27T03:58:50.44549691Z","level":"INFO","msg":"Starting system monitor"}
+{"time":"2025-06-27T03:59:09.386745072Z","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/uic-edu-cn/corn-medical/3vptugym/file_stream\": EOF"}
+{"time":"2025-06-27T03:59:15.706338949Z","level":"INFO","msg":"stream: closing","id":"3vptugym"}
+{"time":"2025-06-27T03:59:15.706374834Z","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2025-06-27T03:59:15.706435192Z","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2025-06-27T03:59:16.407586236Z","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}

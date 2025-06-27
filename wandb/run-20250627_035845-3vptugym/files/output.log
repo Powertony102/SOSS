@@ -1,0 +1,13 @@
+Wandb initialized with project: corn-medical
+total 80 samples
+2 itertations per epoch
+  0%|                             | 1/6001 [00:23<39:09:33, 23.50s/it]
+iteration 1 : loss : 0.820472, loss_s: 1.638130, loss_c: 0.187613, loss_d: 0.007719, loss_hcc: 0.001407
+iteration 2 : loss : 0.761528, loss_s: 1.519629, loss_c: 0.220283, loss_d: 0.293259, loss_hcc: 0.001301
+iteration 3 : loss : 0.796397, loss_s: 1.588852, loss_c: 0.272241, loss_d: 0.003108, loss_hcc: 0.001359
+Traceback (most recent call last):
+  File "/home/jovyan/work/SOSS/train_corn_3d.py", line 275, in <module>
+    memory = dynamic_feature_pool.sample_labeled_features(args.memory_num)
+  File "/home/jovyan/work/SOSS/myutils/dynamic_feature_pool.py", line 32, in sample_labeled_features
+    tmp_feature_list = np.concatenate(tmp_feature_list, axis=0)
+KeyboardInterrupt
