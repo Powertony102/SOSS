@@ -1,0 +1,80 @@
+_wandb:
+    value:
+        cli_version: 0.20.1
+        m: []
+        python_version: 3.10.18
+        t:
+            "1":
+                - 1
+                - 41
+            "2":
+                - 1
+                - 41
+            "3":
+                - 2
+                - 13
+                - 15
+                - 16
+                - 55
+            "4": 3.10.18
+            "5": 0.20.1
+            "12": 0.20.1
+            "13": linux-x86_64
+base_lr:
+    value: 0.01
+batch_size:
+    value: 4
+consistency:
+    value: 1
+consistency_o:
+    value: 0.05
+consistency_rampup:
+    value: 40
+cov_mode:
+    value: patch
+dataset_name:
+    value: LA
+dataset_path:
+    value: /home/jovyan/work/medical_dataset/LA
+deterministic:
+    value: 1
+embedding_dim:
+    value: 64
+exp:
+    value: corn_patch_hcc
+gpu:
+    value: "1"
+hcc_weights:
+    value: 0.5,0.5,1,1,1.5
+labeled_bs:
+    value: 2
+labelnum:
+    value: 4
+lambda_hcc:
+    value: 0.1
+lamda:
+    value: 0.5
+max_iteration:
+    value: 12000
+max_samples:
+    value: 80
+memory_num:
+    value: 256
+model:
+    value: corn
+num_filtered:
+    value: 12800
+patch_size:
+    value: 4
+root_path:
+    value: ./
+seed:
+    value: 1337
+temperature:
+    value: 0.4
+use_wandb:
+    value: true
+wandb_entity:
+    value: null
+wandb_project:
+    value: SOSS
