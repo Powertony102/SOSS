@@ -73,4 +73,36 @@ def patchwise_covariance(feat: torch.Tensor, patch_size: int = 4) -> torch.Tenso
 
     cov_per_patch = _patch_covariance_batch(patches)  # [B*L, C, C]
     cov_mean = cov_per_patch.mean(dim=0)  # average across patches and batch
-    return cov_mean 
+    return cov_mean
+
+
+# -----------------------------------------------------------------------------
+# Extended API: return covariance of **every** patch (no reduction)
+# -----------------------------------------------------------------------------
+
+def patchwise_covariance_all(feat: torch.Tensor, patch_size: int = 4) -> torch.Tensor:
+    """Compute covariance matrix for each patch individually.
+
+    Args:
+        feat: [B, C, H, W] (2-D) or 4-D reshaped from 3-D feature maps.
+    Returns:
+        Tensor of shape [B*L, C, C] where L is number of patches per image.
+    """
+    if feat.dim() != 4:
+        raise ValueError("patchwise_covariance_all expects 4-D tensor [B,C,H,W]")
+
+    B, C, H, W = feat.shape
+    pad_h = (patch_size - H % patch_size) % patch_size
+    pad_w = (patch_size - W % patch_size) % patch_size
+    if pad_h or pad_w:
+        feat = F.pad(feat, (0, pad_w, 0, pad_h), mode='replicate')
+        H, W = H + pad_h, W + pad_w
+
+    unfold = F.unfold(feat, kernel_size=patch_size, stride=patch_size)  # [B, C*k*k, L]
+    k2 = patch_size * patch_size
+    L = unfold.size(-1)
+    patches = unfold.view(B, C, k2, L).permute(0, 3, 2, 1).contiguous()  # [B, L, k2, C]
+    patches = patches.view(-1, k2, C)  # [B*L, k2, C]
+
+    cov_per_patch = _patch_covariance_batch(patches)  # [B*L, C, C]
+    return cov_per_patch 

@@ -1,93 +1,109 @@
 import torch
-import random
 import numpy as np
 
 class DynamicFeaturePool:
-    def __init__(self, num_labeled_samples, num_cls):
-        self.memory_feature = [None] * num_labeled_samples
-        self.memory_label = [None] * num_labeled_samples
+    """Second-Order Dynamic Feature Pool (SOGS-style anchors).
+
+    对于每个类别维护一个动态更新的特征集合，并在采样阶段返回该类别相关性矩阵的前 *k* 个特征向量
+    作为 second-order anchors。
+    """
+
+    def __init__(self, num_labeled_samples: int, num_cls: int, max_store: int = 10000, ema_alpha: float = 0.9):
+        """Args
+        -----
+        num_labeled_samples: 数据集中被标记的图像数（用于索引，仅保留向后兼容）
+        num_cls: 类别数
+        max_store: 每个类别最多保留的特征数量
+        ema_alpha: 更新特征时的 EMA 系数
+        """
         self.num_cls = num_cls
-        self.alpha = 0.9  # Weight Factors
+        self.max_store = max_store
+        self.ema_alpha = ema_alpha
 
-    def update_labeled_features(self, features, labels, idxs):
-        for i in range(len(idxs)):
-            idx = idxs[i].cpu().numpy()
-            new_feature = features[i].detach().cpu().numpy()
+        # 为每个类别建立特征列表（numpy数组列表）
+        self.class_features = [[] for _ in range(num_cls)]
 
-            if self.memory_feature[idx] is not None and self.memory_feature[idx].shape == new_feature.shape:
-                updated_feature = self.alpha * self.memory_feature[idx] + (1 - self.alpha) * new_feature
-                self.memory_feature[idx] = updated_feature
-            else:
-                self.memory_feature[idx] = new_feature
+    # ------------------------------------------------------------------
+    # 更新阶段
+    # ------------------------------------------------------------------
+    def update_labeled_features(self, features_list, labels_list, idxs=None):
+        """从当前 batch 更新特征池。
 
-            self.memory_label[idx] = labels[i].detach().cpu().numpy()
+        Parameters
+        ----------
+        features_list : List[Tensor]
+            len == batch_size，features_list[i] 形状 [N_i, D]
+        labels_list : List[Tensor]
+            len == batch_size，对应每个像素/voxel 的类别标签 shape [N_i]
+        idxs : List[Tensor]
+            (保持接口兼容) 图像索引，此实现不使用
+        """
+        for feat_i, label_i in zip(features_list, labels_list):
+            feat_np = feat_i.detach().cpu().numpy()  # [N_i, D]
+            label_np = label_i.detach().cpu().numpy()
 
-    def sample_labeled_features(self, num_sampled_per_cls):
-        tmp_feature_list = []
-        tmp_label_list = []
-        for i in range(len(self.memory_label)):
-            if self.memory_label[i] is not None:
-                tmp_feature_list.append(self.memory_feature[i])
-                tmp_label_list.append(self.memory_label[i])
-        tmp_feature_list = np.concatenate(tmp_feature_list, axis=0)
-        tmp_label_list = np.concatenate(tmp_label_list, axis=0)
-        selected_feature_list = []
+            for c in range(self.num_cls):
+                mask_c = label_np == c
+                if np.any(mask_c):
+                    feats_c = feat_np[mask_c]  # [N_c, D]
+
+                    # 追加到类别存储
+                    if len(self.class_features[c]) == 0:
+                        self.class_features[c].append(feats_c)
+                    else:
+                        self.class_features[c].append(feats_c)
+
+                    # 拼接并裁剪至 max_store
+                    all_feats = np.concatenate(self.class_features[c], axis=0)
+                    if all_feats.shape[0] > self.max_store:
+                        all_feats = all_feats[-self.max_store :]
+                    self.class_features[c] = [all_feats]
+
+    # ------------------------------------------------------------------
+    # 采样阶段
+    # ------------------------------------------------------------------
+    def sample_labeled_features(self, num_eigenvectors: int = 8):
+        """返回每个类别的 second-order anchor（相关性矩阵的前 k 个特征向量）。
+
+        Returns
+        -------
+        List[np.ndarray] ; len == num_cls
+            若某类别无特征或特征不足返回 None，否则返回形状 [k, D] 的数组。
+        """
+        anchor_list = []
         for c in range(self.num_cls):
-            mask_c = tmp_label_list == c
-            features_c = tmp_feature_list[mask_c]
-            if features_c.shape[0] >= num_sampled_per_cls:
-                num_features = features_c.shape[0]
-                # Choose high confidence samples
-                high_conf_indices = random.sample(range(num_features), num_sampled_per_cls // 2)
-                high_conf_features = features_c[high_conf_indices]
+            if len(self.class_features[c]) == 0:
+                anchor_list.append(None)
+                continue
 
-                # Choose low confidence samples
-                low_conf_indices = random.sample(range(num_features), num_sampled_per_cls // 2)
-                low_conf_features = features_c[low_conf_indices]
+            feats = self.class_features[c][0]  # [N, D]
+            N, D = feats.shape
+            if N < 2:
+                anchor_list.append(None)
+                continue
 
-                # Merge high confidence and low confidence samples
-                selected_features = np.concatenate((high_conf_features, low_conf_features), axis=0)
-                selected_feature_list.append(selected_features)
-            else:
-                selected_feature_list.append(None)
-        return selected_feature_list
+            # --- 计算协方差 Σ ---
+            X = torch.from_numpy(feats).float()
+            mu = X.mean(dim=0, keepdim=True)
+            X_centered = X - mu
+            cov = X_centered.t().mm(X_centered) / (N - 1)
 
-def sample_labeled_features_from_both_memory_bank(memory_a, memory_b, num_sampled_per_cls):
-    tmp_feature_list_a, tmp_feature_list_b = [], []
-    tmp_label_list = []
-    for i in range(len(memory_a.memory_label)):
-        if memory_a.memory_label[i] is not None:
-            tmp_feature_list_a.append(memory_a.memory_feature[i])
-            tmp_feature_list_b.append(memory_b.memory_feature[i])
-            tmp_label_list.append(memory_a.memory_label[i])
-    tmp_feature_list_a = np.concatenate(tmp_feature_list_a, axis=0)
-    tmp_feature_list_b = np.concatenate(tmp_feature_list_b, axis=0)
-    tmp_label_list = np.concatenate(tmp_label_list, axis=0)
+            # --- 转为相关性矩阵 R ---
+            std = torch.sqrt(torch.diag(cov) + 1e-6)
+            inv_std = 1.0 / std
+            R = cov * inv_std.unsqueeze(1) * inv_std.unsqueeze(0)
 
-    selected_feature_list_a, selected_feature_list_b = [], []
-    for c in range(memory_a.num_cls):
-        mask_c = tmp_label_list == c
-        features_a = tmp_feature_list_a[mask_c]
-        features_b = tmp_feature_list_b[mask_c]
-        if features_a.shape[0] >= num_sampled_per_cls:
-            num_features = features_a.shape[0]
-            # Choose high confidence samples
-            high_conf_indices = random.sample(range(num_features), num_sampled_per_cls // 2)
-            high_conf_features_a = features_a[high_conf_indices]
-            high_conf_features_b = features_b[high_conf_indices]
+            # --- 特征分解 ---
+            eigvals, eigvecs = torch.linalg.eigh(R)  # ascending order
+            idx = torch.argsort(eigvals, descending=True)
+            k = min(num_eigenvectors, D)
+            top_vecs = eigvecs[:, idx[:k]].t().cpu().numpy()  # [k, D]
 
-            # Choose low confidence samples
-            low_conf_indices = random.sample(range(num_features), num_sampled_per_cls // 2)
-            low_conf_features_a = features_a[low_conf_indices]
-            low_conf_features_b = features_b[low_conf_indices]
+            anchor_list.append(top_vecs)
 
-            # Merge high confidence and low confidence samples
-            selected_features_a = np.concatenate((high_conf_features_a, low_conf_features_a), axis=0)
-            selected_features_b = np.concatenate((high_conf_features_b, low_conf_features_b), axis=0)
+        return anchor_list
 
-            selected_feature_list_a.append(selected_features_a)
-            selected_feature_list_b.append(selected_features_b)
-        else:
-            selected_feature_list_a.append(None)
-            selected_feature_list_b.append(None)
-    return selected_feature_list_a, selected_feature_list_b
+# ----------------------------------------------------------------------
+# 保持旧接口兼容
+# ----------------------------------------------------------------------
+SecondOrderDynamicFeaturePool = DynamicFeaturePool

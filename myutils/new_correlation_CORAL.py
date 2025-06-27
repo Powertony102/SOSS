@@ -4,14 +4,40 @@ import numpy as np
 # Local utilities for efficient covariance computation
 from myutils.covariance_utils import compute_covariance, patchwise_covariance
 
-def coral_loss(source, target):
+def _logm_spd(mat: torch.Tensor, eps: float = 1e-6):
+    """Log-Euclidean of an SPD matrix (batched or single)."""
+    if mat.dim() == 2:
+        eigvals, eigvecs = torch.linalg.eigh(mat)
+        eigvals = torch.clamp(eigvals, min=eps)
+        return eigvecs @ torch.diag(torch.log(eigvals)) @ eigvecs.t()
+    elif mat.dim() == 3:
+        # batch: [N,C,C]
+        logs = []
+        for m in mat:
+            logs.append(_logm_spd(m, eps))
+        return torch.stack(logs, dim=0)
+    else:
+        raise ValueError("mat must be 2-D or 3-D")
+
+def coral_loss(source, target, divide_by_dim: bool = True, scale: float = 1.0, metric: str = 'fro'):
+    """CORAL loss with optional log-Euclidean metric.
+
+    Args:
+        source, target: covariance matrices ([C,C] or [N,C,C])
+        divide_by_dim: divide by d^2 (d=C)
+        scale: additional scaling factor
+        metric: 'fro' or 'log'
     """
-    Calculate CORAL loss: the Frobenius norm difference between the source and target feature covariance matrices
-    """
-    # Calculate the square of the Frobenius norm
-    d = source.size(1)
-    loss = torch.norm(source - target, p='fro') ** 2 / (4 * d * d)
-    return loss
+    if metric == 'log':
+        source = _logm_spd(source)
+        target = _logm_spd(target)
+
+    diff = source - target
+    loss = torch.norm(diff, p='fro') ** 2
+    if divide_by_dim:
+        d = source.size(-1)
+        loss = loss / (d * d)
+    return scale * loss
 
 def cal_coral_correlation(features,
                           prob,

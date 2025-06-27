@@ -67,6 +67,15 @@ parser.add_argument('--cov_mode', type=str, default='patch', choices=['full', 'p
 parser.add_argument('--patch_size', type=int, default=4, help='patch size for patch-wise covariance')
 parser.add_argument('--lambda_hcc', type=float, default=0.1, help='weight of hierarchical covariance consistency loss')
 parser.add_argument('--hcc_weights', type=str, default='0.5,0.5,1,1,1.5', help='comma separated weights for 5 encoder layers')
+parser.add_argument('--hcc_patch_strategy', type=str, default='mean_cov', 
+                    choices=['mean_cov', 'mean_loss', 'max_loss', 'topk'],
+                    help='patch strategy for HCC loss: mean_cov|mean_loss|max_loss|topk')
+parser.add_argument('--hcc_topk', type=int, default=5, help='top-k value when hcc_patch_strategy is topk')
+parser.add_argument('--hcc_metric', type=str, default='fro', choices=['fro', 'log'],
+                    help='metric for HCC loss computation: fro (Frobenius) or log (Log-Euclidean)')
+parser.add_argument('--hcc_scale', type=float, default=1.0, help='scaling factor for HCC loss')
+parser.add_argument('--hcc_divide_by_dim', action='store_true', default=True, 
+                    help='whether to divide CORAL loss by dimension squared')
 parser.add_argument('--use_wandb', action='store_true', help='whether to use wandb for logging')
 parser.add_argument('--wandb_project', type=str, default='SOSS', help='wandb project name')
 parser.add_argument('--wandb_entity', type=str, default=None, help='wandb entity name')
@@ -125,8 +134,9 @@ if __name__ == "__main__":
             project=args.wandb_project,
             entity=args.wandb_entity,
             config=vars(args),
-            name=f"{args.exp}_{args.model}_cov_{args.cov_mode}_patch_{args.patch_size}",
-            tags=[args.dataset_name, args.cov_mode, f"patch_{args.patch_size}"]
+            name=f"{args.exp}_{args.model}_hcc_{args.hcc_patch_strategy}_{args.hcc_metric}_scale{args.hcc_scale}",
+            tags=[args.dataset_name, args.cov_mode, f"patch_{args.patch_size}", 
+                  args.hcc_patch_strategy, args.hcc_metric, f"hcc_scale_{args.hcc_scale}"]
         )
         logging.info(f"Wandb initialized with project: {args.wandb_project}")
 
@@ -207,7 +217,12 @@ if __name__ == "__main__":
 
             # Calculate Hierarchical Covariance Consistency (HCC) Loss
             loss_hcc = hierarchical_coral(features_v, features_a, hcc_weights,
-                                        cov_mode=args.cov_mode, patch_size=args.patch_size)
+                                        cov_mode=args.cov_mode, 
+                                        patch_size=args.patch_size,
+                                        patch_strategy=args.hcc_patch_strategy,
+                                        topk=args.hcc_topk,
+                                        metric=args.hcc_metric,
+                                        scale=args.hcc_scale)
 
             # print(f"outputs_v shape:{outputs_v.shape}"  + "\n"  )
             # print(f"embedding_v shape:{embedding_v.shape}"  + "\n" )
@@ -345,6 +360,7 @@ if __name__ == "__main__":
                     'train/lambda_c': lambda_c,
                     'train/lambda_d': lambda_d,
                     'train/lambda_hcc': args.lambda_hcc,
+                    'train/hcc_scale': args.hcc_scale,
                     'train/learning_rate': optimizer.param_groups[0]['lr'],
                     'iteration': iter_num
                 })
