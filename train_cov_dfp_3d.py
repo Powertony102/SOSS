@@ -142,8 +142,10 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
     outputs_list = [outputs_v, outputs_a]
     num_outputs = len(outputs_list)
 
-    y_ori = torch.zeros((num_outputs,) + outputs_list[0].shape)
-    y_pseudo_label = torch.zeros((num_outputs,) + outputs_list[0].shape)
+    # 确保张量在正确的设备上（GPU）
+    device = volume_batch.device
+    y_ori = torch.zeros((num_outputs,) + outputs_list[0].shape, device=device)
+    y_pseudo_label = torch.zeros((num_outputs,) + outputs_list[0].shape, device=device)
 
     loss_s = 0
     for i in range(num_outputs):
@@ -299,8 +301,10 @@ def train_stage_three_main(model, sampled_batch, optimizer, consistency_criterio
     outputs_list = [outputs_v, outputs_a]
     num_outputs = len(outputs_list)
 
-    y_ori = torch.zeros((num_outputs,) + outputs_list[0].shape)
-    y_pseudo_label = torch.zeros((num_outputs,) + outputs_list[0].shape)
+    # 确保张量在正确的设备上（GPU）
+    device = volume_batch.device
+    y_ori = torch.zeros((num_outputs,) + outputs_list[0].shape, device=device)
+    y_pseudo_label = torch.zeros((num_outputs,) + outputs_list[0].shape, device=device)
 
     loss_s = 0
     for i in range(num_outputs):
@@ -372,15 +376,25 @@ if __name__ == "__main__":
     # 创建模型
     model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train", 
                        feat_dim=args.embedding_dim, num_dfp=args.num_dfp, use_selector=True)
+    
+    # 移动模型到GPU
+    if torch.cuda.is_available():
+        model = model.cuda()
+        logging.info("Model moved to GPU")
+    else:
+        logging.warning("CUDA not available, using CPU")
 
-    # 创建协方差DFP
+    # 创建协方差DFP (指定GPU设备)
     cov_dfp = None
     if args.use_dfp:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
         cov_dfp = CovarianceDynamicFeaturePool(
             feature_dim=args.embedding_dim,
             num_dfp=args.num_dfp,
-            max_global_features=args.max_global_features
+            max_global_features=args.max_global_features,
+            device=device
         )
+        logging.info(f"CovarianceDynamicFeaturePool created on device: {device}")
 
     # 创建数据加载器
     if args.dataset_name == "LA":

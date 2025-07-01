@@ -141,6 +141,13 @@ if __name__ == "__main__":
         logging.info(f"Wandb initialized with project: {args.wandb_project}")
 
     model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
+    
+    # 移动模型到GPU
+    if torch.cuda.is_available():
+        model = model.cuda()
+        logging.info("Model moved to GPU")
+    else:
+        logging.warning("CUDA not available, using CPU")
 
     dynamic_feature_pool = dynamic_feature_pool.DynamicFeaturePool(num_labeled_samples=args.labelnum, num_cls=num_classes)
     if args.dataset_name == "LA":
@@ -195,8 +202,10 @@ if __name__ == "__main__":
             outputs_list = [outputs_v, outputs_a]
             num_outputs = len(outputs_list)
 
-            y_ori = torch.zeros((num_outputs,) + outputs_list[0].shape)
-            y_pseudo_label = torch.zeros((num_outputs,) + outputs_list[0].shape)
+            # 确保张量在正确的设备上（GPU）
+            device = volume_batch.device
+            y_ori = torch.zeros((num_outputs,) + outputs_list[0].shape, device=device)
+            y_pseudo_label = torch.zeros((num_outputs,) + outputs_list[0].shape, device=device)
 
             loss_s = 0
             for i in range(num_outputs):
