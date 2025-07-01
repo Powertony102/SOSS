@@ -65,6 +65,7 @@ parser.add_argument('--cov_mode', type=str, default='patch', choices=['full', 'p
 parser.add_argument('--patch_size', type=int, default=4, help='patch size for covariance')
 
 # DFP参数
+parser.add_argument('--use_dfp', action='store_true', help='whether to use dynamic feature pool')
 parser.add_argument('--num_dfp', type=int, default=8, help='number of dynamic feature pools')
 parser.add_argument('--dfp_start_iter', type=int, default=2000, help='iteration to start building DFPs')
 parser.add_argument('--selector_train_iter', type=int, default=50, help='iterations for training selector')
