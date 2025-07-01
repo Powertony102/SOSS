@@ -442,7 +442,9 @@ if __name__ == "__main__":
     
     # 训练状态
     dfps_built = False
+    selector_trained = False  # selector是否已训练好
     selector_train_counter = 0
+    last_dfp_reconstruct_iter = 0  # 上次DFP重构的迭代数
     
     iterator = tqdm(range(max_epoch), ncols=70)
     for epoch_num in iterator:
@@ -478,9 +480,14 @@ if __name__ == "__main__":
                 # 阶段二：构建DFP
                 logging.info("Starting Stage 2: Building DFPs...")
                 dfps_built = train_stage_two_build_dfp(cov_dfp)
+                last_dfp_reconstruct_iter = iter_num
                 
                 if dfps_built:
                     stats = cov_dfp.get_statistics()
+                    logging.info("DFP construction completed, starting selector training...")
+                    selector_trained = False  # 需要重新训练selector
+                    selector_train_counter = 0  # 重置selector计数器
+                    
                     if args.use_wandb:
                         wandb.log({
                             'stage': 2,
@@ -488,27 +495,13 @@ if __name__ == "__main__":
                             'dfp/min_dfp_size': stats['min_dfp_size'],
                             'dfp/max_dfp_size': stats['max_dfp_size'],
                             'dfp/mean_dfp_size': stats['mean_dfp_size'],
+                            'selector_trained': selector_trained,
                             'iteration': iter_num
                         })
                 
-                # 在构建DFP后，立即进行一次主模型训练
+                # 构建DFP后，开始训练selector
                 if dfps_built:
-                    metrics = train_stage_three_main(model, sampled_batch, optimizer, consistency_criterion, 
-                                                   dice_loss, cov_dfp, iter_num, writer)
-                    if args.use_wandb:
-                        wandb.log({
-                            'stage': 3,
-                            'train/loss': metrics['total_loss'],
-                            'train/loss_supervised': metrics['loss_s'],
-                            'train/loss_consistency': metrics['loss_c'],
-                            'train/loss_hcc': metrics['loss_hcc'],
-                            'iteration': iter_num
-                        })
-            
-            elif iter_num > args.dfp_start_iter and args.use_dfp and dfps_built:
-                # 阶段三：交替训练
-                if selector_train_counter < args.selector_train_iter:
-                    # 训练Selector
+                    logging.info(f"Stage 3A - Starting Selector Training: counter={selector_train_counter}/{args.selector_train_iter}")
                     selector_metrics = train_stage_three_selector(model, sampled_batch, selector_optimizer, 
                                                                 cov_dfp, iter_num)
                     selector_train_counter += 1
@@ -519,13 +512,61 @@ if __name__ == "__main__":
                             'submode': 'selector',
                             'selector/loss': selector_metrics['selector_loss'],
                             'selector/accuracy': selector_metrics['selector_accuracy'],
+                            'selector_train_counter': selector_train_counter,
+                            'selector_trained': selector_trained,
                             'iteration': iter_num
                         })
+            
+            elif iter_num > args.dfp_start_iter and args.use_dfp and dfps_built:
+                # 阶段三：循环训练
+                
+                # 检查是否需要重构DFP
+                if iter_num - last_dfp_reconstruct_iter >= args.dfp_reconstruct_interval:
+                    logging.info(f"Reconstructing DFPs at iteration {iter_num}...")
+                    cov_dfp.reconstruct_dfps()
+                    last_dfp_reconstruct_iter = iter_num
+                    selector_trained = False  # 需要重新训练selector
+                    selector_train_counter = 0  # 重置selector计数器
+                    logging.info("DFP reconstructed, selector needs retraining")
+                    
+                    if args.use_wandb:
+                        wandb.log({
+                            'stage': 3,
+                            'submode': 'dfp_reconstruct',
+                            'dfp_reconstructed': True,
+                            'selector_trained': selector_trained,
+                            'iteration': iter_num
+                        })
+                
+                # 训练逻辑
+                if not selector_trained:
+                    # 阶段3A：训练Selector直到收敛
+                    if selector_train_counter < args.selector_train_iter:
+                        logging.info(f"Stage 3A - Training Selector: counter={selector_train_counter}/{args.selector_train_iter}")
+                        selector_metrics = train_stage_three_selector(model, sampled_batch, selector_optimizer, 
+                                                                    cov_dfp, iter_num)
+                        selector_train_counter += 1
+                        
+                        # 检查是否完成selector训练
+                        if selector_train_counter >= args.selector_train_iter:
+                            selector_trained = True
+                            logging.info(f"Selector training completed! Switching to main model training.")
+                        
+                        if args.use_wandb:
+                            wandb.log({
+                                'stage': 3,
+                                'submode': 'selector',
+                                'selector/loss': selector_metrics['selector_loss'],
+                                'selector/accuracy': selector_metrics['selector_accuracy'],
+                                'selector_train_counter': selector_train_counter,
+                                'selector_trained': selector_trained,
+                                'iteration': iter_num
+                            })
                 else:
-                    # 训练主模型
+                    # 阶段3B：使用训练好的selector进行主模型训练
+                    logging.info(f"Stage 3B - Training Main Model with trained selector")
                     metrics = train_stage_three_main(model, sampled_batch, optimizer, consistency_criterion, 
                                                    dice_loss, cov_dfp, iter_num, writer)
-                    selector_train_counter = 0  # 重置计数器
                     
                     if args.use_wandb:
                         wandb.log({
@@ -535,13 +576,9 @@ if __name__ == "__main__":
                             'train/loss_supervised': metrics['loss_s'],
                             'train/loss_consistency': metrics['loss_c'],
                             'train/loss_hcc': metrics['loss_hcc'],
+                            'selector_trained': selector_trained,
                             'iteration': iter_num
                         })
-                
-                # 周期性重构DFP
-                if iter_num % args.dfp_reconstruct_interval == 0:
-                    logging.info("Reconstructing DFPs...")
-                    cov_dfp.reconstruct_dfps()
                     
             elif not args.use_dfp:
                 # 不使用DFP时的标准训练
