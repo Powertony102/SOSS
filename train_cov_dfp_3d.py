@@ -89,6 +89,7 @@ parser.add_argument('--hcc_divide_by_dim', action='store_true', default=True,
 parser.add_argument('--memory_num', type=int, default=256, help='num of embeddings per class in memory bank')
 parser.add_argument('--num_filtered', type=int, default=12800,
                     help='num of unlabeled embeddings to calculate similarity')
+parser.add_argument('--deterministic', type=int, default=1, help='whether use deterministic training')
 
 args = parser.parse_args()
 
