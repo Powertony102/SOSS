@@ -318,26 +318,42 @@ class CovarianceDynamicFeaturePool:
         Returns:
             separation_loss: 标量张量
         """
-        if not self.dfps_built or self.dfp_centers is None:
+        if not self.dfps_built:
             return torch.tensor(0.0, device=self.device, requires_grad=True)
         
         total_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         num_pairs = 0
         
+        # 动态计算每个DFP的当前中心（参与梯度更新）
+        current_centers = []
+        for i in range(self.num_dfp):
+            if self.dfps[i] is not None and self.dfps[i].shape[0] > 0:
+                # 计算当前DFP的中心（保持梯度）
+                center = torch.mean(self.dfps[i], dim=0)  # [D]
+                current_centers.append(center)
+            else:
+                # 如果DFP为空，使用零向量（不参与梯度）
+                center = torch.zeros(self.feature_dim, device=self.device)
+                current_centers.append(center)
+        
         # 计算所有池对之间的分离损失
         for i in range(self.num_dfp):
             for j in range(i + 1, self.num_dfp):
-                # 计算两个DFP中心之间的L2距离的平方
-                center_i = self.dfp_centers[i]  # [D]
-                center_j = self.dfp_centers[j]  # [D]
-                
-                distance_squared = torch.sum((center_i - center_j) ** 2)
-                
-                # 使用hinge loss: max(0, margin - distance_squared)
-                separation_loss = torch.relu(margin - distance_squared)
-                
-                total_loss = total_loss + separation_loss
-                num_pairs += 1
+                # 只有当两个DFP都非空时才计算分离损失
+                if (self.dfps[i] is not None and self.dfps[i].shape[0] > 0 and 
+                    self.dfps[j] is not None and self.dfps[j].shape[0] > 0):
+                    
+                    center_i = current_centers[i]  # [D]
+                    center_j = current_centers[j]  # [D]
+                    
+                    # 计算两个DFP中心之间的L2距离的平方
+                    distance_squared = torch.sum((center_i - center_j) ** 2)
+                    
+                    # 使用hinge loss: max(0, margin - distance_squared)
+                    separation_loss = torch.relu(margin - distance_squared)
+                    
+                    total_loss = total_loss + separation_loss
+                    num_pairs += 1
         
         # 返回平均损失
         if num_pairs > 0:
@@ -383,4 +399,51 @@ class CovarianceDynamicFeaturePool:
             else:
                 batch_features_by_dfp[dfp_idx] = None
         
-        return batch_features_by_dfp 
+        return batch_features_by_dfp
+    
+    def update_dfps_with_batch_features(self, batch_features_by_dfp: dict, 
+                                       update_rate: float = 0.1, max_dfp_size: int = 1000):
+        """用批次特征更新DFPs（允许梯度更新）
+        
+        Args:
+            batch_features_by_dfp: dict {dfp_idx: features_tensor}
+            update_rate: DFP更新率，控制新特征的权重
+            max_dfp_size: DFP的最大大小
+        """
+        if not self.dfps_built:
+            return
+            
+        for dfp_idx, batch_features in batch_features_by_dfp.items():
+            if batch_features is None or batch_features.numel() == 0:
+                continue
+                
+            batch_features_gpu = batch_features.to(self.device).detach()  # 断开梯度以避免累积
+            
+            if self.dfps[dfp_idx] is None or self.dfps[dfp_idx].shape[0] == 0:
+                # 如果DFP为空，直接使用批次特征
+                self.dfps[dfp_idx] = batch_features_gpu.clone()
+            else:
+                # 混合更新：保留一部分老特征，加入一部分新特征
+                current_dfp = self.dfps[dfp_idx]
+                num_current = current_dfp.shape[0]
+                num_new = batch_features_gpu.shape[0]
+                
+                # 计算保留的老特征数量
+                num_keep = min(num_current, max_dfp_size - num_new)
+                if num_keep > 0:
+                    # 随机选择要保留的老特征
+                    keep_indices = torch.randperm(num_current, device=self.device)[:num_keep]
+                    kept_features = current_dfp[keep_indices]
+                    
+                    # 组合老特征和新特征
+                    updated_dfp = torch.cat([kept_features, batch_features_gpu], dim=0)
+                else:
+                    # 如果新特征太多，只保留新特征
+                    updated_dfp = batch_features_gpu[:max_dfp_size]
+                
+                # 确保更新后的DFP不超过最大大小
+                if updated_dfp.shape[0] > max_dfp_size:
+                    indices = torch.randperm(updated_dfp.shape[0], device=self.device)[:max_dfp_size]
+                    updated_dfp = updated_dfp[indices]
+                
+                self.dfps[dfp_idx] = updated_dfp 

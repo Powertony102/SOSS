@@ -388,6 +388,12 @@ def train_stage_three_main(model, sampled_batch, optimizer, consistency_criterio
     total_loss.backward()
     optimizer.step()
 
+    # 在反向传播后更新DFPs
+    with torch.no_grad():
+        cov_dfp.update_dfps_with_batch_features(batch_features_by_dfp, 
+                                               update_rate=0.1, 
+                                               max_dfp_size=1000)
+
     logging.info('Stage 3B - Main training iter %d : loss : %03f, loss_s: %03f, loss_c: %03f, loss_hcc: %03f, loss_compact: %03f, loss_separate: %03f' % (
         iter_num, total_loss, loss_s, loss_c, loss_hcc, loss_compact, loss_separate))
     
