@@ -156,7 +156,16 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
 
     # 对于2D ACDC数据，确保输入维度正确
     if len(volume_batch.shape) == 4:  # [B, C, H, W]
-        outputs_v, outputs_a, embedding_v, embedding_a, features_v, features_a = model(volume_batch, with_hcc=True)
+        model_output = model(volume_batch, with_hcc=True)
+        if isinstance(model_output, dict):
+            outputs_v = model_output['seg1']
+            outputs_a = model_output['seg2']
+            embedding_v = model_output['embedding1']
+            embedding_a = model_output['embedding2']
+            features_v = model_output['features1']
+            features_a = model_output['features2']
+        else:
+            outputs_v, outputs_a, embedding_v, embedding_a, features_v, features_a = model_output
     else:
         raise ValueError(f"Unexpected input shape: {volume_batch.shape}")
         
@@ -267,7 +276,16 @@ def train_stage_two(model, sampled_batch, optimizer, selector_optimizer, consist
     volume_batch, label_batch, idx = volume_batch.cuda(), label_batch.cuda(), idx.cuda()
 
     # 前向传播
-    outputs_v, outputs_a, embedding_v, embedding_a, features_v, features_a = model(volume_batch, with_hcc=True)
+    model_output = model(volume_batch, with_hcc=True)
+    if isinstance(model_output, dict):
+        outputs_v = model_output['seg1']
+        outputs_a = model_output['seg2']
+        embedding_v = model_output['embedding1']
+        embedding_a = model_output['embedding2']
+        features_v = model_output['features1']
+        features_a = model_output['features2']
+    else:
+        outputs_v, outputs_a, embedding_v, embedding_a, features_v, features_a = model_output
     
     # 构建DFPs
     if not cov_dfp.dfps_built and cov_dfp.get_global_pool_size() > args.num_dfp * 10:
@@ -471,7 +489,17 @@ if __name__ == "__main__":
     logging.info("{} iterations per epoch".format(len(trainloader)))
     
     consistency_criterion = losses.mse_loss
-    dice_loss = losses.dice_loss
+    
+    # 创建简单的二元Dice损失函数
+    def binary_dice_loss(pred, target, smooth=1e-8):
+        """二元Dice损失函数，适用于单类别预测"""
+        pred = pred.contiguous().view(-1)
+        target = target.contiguous().view(-1)
+        intersection = (pred * target).sum()
+        dice = (2. * intersection + smooth) / (pred.sum() + target.sum() + smooth)
+        return 1 - dice
+    
+    dice_loss = binary_dice_loss
     iter_num = 0
     best_dice = 0
     max_epoch = max_iterations // len(trainloader) + 1
