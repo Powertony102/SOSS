@@ -76,7 +76,7 @@ parser.add_argument('--embedding_dim', type=int, default=64, help='embedding dim
 # 度量学习参数（新增）
 parser.add_argument('--lambda_compact', type=float, default=0.1, help='weight for intra-pool compactness loss')
 parser.add_argument('--lambda_separate', type=float, default=0.05, help='weight for inter-pool separation loss')
-parser.add_argument('--separation_margin', type=float, default=0.2, help='margin for inter-pool separation loss (recommended: 0.1-0.5)')
+parser.add_argument('--separation_margin', type=float, default=1.0, help='margin for inter-pool separation loss with Softplus (recommended: 0.5-2.0 for distance squared)')
 
 # 其他参数
 parser.add_argument('--use_wandb', action='store_true', help='use wandb for logging')

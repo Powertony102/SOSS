@@ -308,20 +308,26 @@ class CovarianceDynamicFeaturePool:
             return torch.tensor(0.0, device=self.device, requires_grad=True)
     
     def compute_inter_pool_separation_loss(self, margin: float = 1.0) -> torch.Tensor:
-        """计算池间分离性损失 (Inter-Pool Separation Loss)
+        """计算池间分离性损失 (Inter-Pool Separation Loss) - Softplus 平滑边际版本
         
-        修改后的公式: L_separate = sum_{i=1}^{num_dfp} sum_{j=i+1}^{num_dfp} max(0, margin - ||μ_i - μ_j||_2)
+        改进的公式: L_separate = sum_{i<j} softplus(margin - ||μ_i - μ_j||_2^2)
+                             = sum_{i<j} log(1 + exp(margin - ||μ_i - μ_j||_2^2))
+        
+        优点：
+        - 无"死区"：任何距离下都有非零梯度
+        - 梯度连续平滑：解决震荡问题
+        - 数值稳定：避免硬边界导致的跳跃
         
         Args:
-            margin: 分离边际 m，建议使用较小的值如0.1-0.5
+            margin: 分离边际 m，建议使用 0.5-2.0 (相对于距离平方)
         
         Returns:
             separation_loss: 标量张量
         """
         if not self.dfps_built:
-            return torch.tensor(0.0, device=self.device, requires_grad=True)
+            return torch.tensor(0.0, device=self.device)
         
-        total_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+        total_loss = torch.tensor(0.0, device=self.device)
         num_pairs = 0
         
         # 动态计算每个DFP的当前中心（参与梯度更新）
@@ -332,44 +338,36 @@ class CovarianceDynamicFeaturePool:
                 center = torch.mean(self.dfps[i], dim=0)  # [D]
                 current_centers.append(center)
             else:
-                # 如果DFP为空，使用零向量（不参与梯度）
-                center = torch.zeros(self.feature_dim, device=self.device)
-                current_centers.append(center)
+                # 如果DFP为空，跳过此DFP
+                current_centers.append(None)
         
-        # 如果有效的DFP少于2个，无法计算分离损失
-        valid_dfps = sum(1 for i in range(self.num_dfp) 
-                        if self.dfps[i] is not None and self.dfps[i].shape[0] > 0)
-        if valid_dfps < 2:
-            return torch.tensor(0.0, device=self.device, requires_grad=True)
-        
-        # 计算所有池对之间的分离损失
+        # 计算所有有效池对之间的分离损失
         for i in range(self.num_dfp):
             for j in range(i + 1, self.num_dfp):
                 # 只有当两个DFP都非空时才计算分离损失
-                if (self.dfps[i] is not None and self.dfps[i].shape[0] > 0 and 
-                    self.dfps[j] is not None and self.dfps[j].shape[0] > 0):
+                if (current_centers[i] is not None and current_centers[j] is not None):
                     
                     center_i = current_centers[i]  # [D]
                     center_j = current_centers[j]  # [D]
                     
-                    # 计算两个DFP中心之间的L2距离（而不是距离平方）
-                    distance = torch.norm(center_i - center_j, p=2) + 1e-8  # 加小常数避免除零
+                    # 计算两个DFP中心之间的L2距离的平方
+                    distance_squared = torch.sum((center_i - center_j) ** 2)
                     
-                    # 修改后的hinge loss: max(0, margin - distance)
-                    # 当distance >= margin时，损失为0
-                    # 当distance < margin时，损失为margin - distance，鼓励增大距离
-                    separation_loss = torch.relu(margin - distance)
+                    # Softplus 平滑分离损失: softplus(margin - distance_squared)
+                    # = log(1 + exp(margin - distance_squared))
+                    # 这保证了连续的梯度，没有"死区"
+                    separation_loss = torch.nn.functional.softplus(margin - distance_squared)
                     
                     total_loss = total_loss + separation_loss
                     num_pairs += 1
         
-        # 返回平均损失，并进行归一化以提高数值稳定性
+        # 返回平均损失，加上小的正则化避免数值问题
         if num_pairs > 0:
             avg_loss = total_loss / num_pairs
-            # 对损失进行归一化，避免过大的梯度
-            return torch.tanh(avg_loss)  # 使用tanh将损失限制在[0,1]范围内
+            # 可选：添加小的数值稳定性处理
+            return avg_loss
         else:
-            return torch.tensor(0.0, device=self.device, requires_grad=True)
+            return torch.tensor(0.0, device=self.device)
     
     def compute_metric_learning_losses(self, batch_features_by_dfp: dict, 
                                      margin: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor]:
