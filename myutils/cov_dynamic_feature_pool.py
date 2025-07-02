@@ -72,9 +72,18 @@ class CovarianceDynamicFeaturePool:
                 self.global_features = self.global_features[i:]
                 break
     
-    def build_dfps(self) -> bool:
-        """构建多个DFP（阶段二）- GPU加速版本
+    def build_dfps(self, max_optimization_iterations: int = 50, learning_rate: float = 0.01) -> bool:
+        """构建多个DFP（阶段二）- 度量学习驱动的构建方案
         
+        改进方案：
+        1. 协方差分析初始化
+        2. 度量学习优化池间分离和池内紧凑
+        3. 确保构建阶段就满足度量学习目标
+        
+        Args:
+            max_optimization_iterations: 度量学习优化的最大迭代次数
+            learning_rate: 优化学习率
+            
         Returns:
             bool: 是否成功构建DFP
         """
@@ -82,14 +91,40 @@ class CovarianceDynamicFeaturePool:
             logging.warning("Global feature pool is empty, cannot build DFPs")
             return False
             
-        # 2.1 计算全局特征的协方差与相关性 (GPU加速)
+        # 获取全局特征
         F_global = torch.cat(self.global_features, dim=0)  # [N, D] GPU张量
         N, D = F_global.shape
         
         if N < self.num_dfp:
             logging.warning(f"Not enough features ({N}) to build {self.num_dfp} DFPs")
             return False
-            
+        
+        logging.info(f"Building DFPs with metric learning optimization: {N} features, {self.num_dfp} DFPs")
+        
+        # 第一步：使用协方差分析进行初始化
+        success = self._initial_dfp_construction_with_covariance(F_global)
+        if not success:
+            return False
+        
+        # 第二步：通过度量学习优化DFP质量
+        success = self._optimize_dfps_with_metric_learning(F_global, max_optimization_iterations, learning_rate)
+        if not success:
+            return False
+        
+        self.dfps_built = True
+        
+        # 记录最终统计信息
+        stats = self.get_statistics()
+        final_compact_loss, final_separate_loss = self._compute_current_metric_losses()
+        logging.info(f"DFP construction completed: {stats}")
+        logging.info(f"Final metric losses - Compact: {final_compact_loss:.6f}, Separate: {final_separate_loss:.6f}")
+        
+        return True
+    
+    def _initial_dfp_construction_with_covariance(self, F_global: torch.Tensor) -> bool:
+        """第一步：使用协方差分析进行初始DFP构建"""
+        N, D = F_global.shape
+        
         # 计算均值向量 μ (GPU)
         mu = torch.mean(F_global, dim=0)  # [D]
         
@@ -101,7 +136,7 @@ class CovarianceDynamicFeaturePool:
         std = torch.sqrt(torch.diag(Sigma) + 1e-8)  # [D]
         R = Sigma / (std.unsqueeze(1) * std.unsqueeze(0))  # [D, D]
         
-        # 2.2 提取主要的共变模式 (GPU)
+        # 提取主要的共变模式 (GPU)
         try:
             # 使用torch的特征分解 (GPU加速)
             eigenvalues, eigenvectors = torch.linalg.eigh(R)
@@ -115,15 +150,169 @@ class CovarianceDynamicFeaturePool:
             logging.error(f"Eigenvalue decomposition failed: {e}")
             return False
         
-        # 2.3 构建动态特征池 (DFP) (GPU)
+        # 构建初始DFP分配
         self._assign_features_to_dfps(F_global)
         
-        # 2.4 计算每个DFP的中心 (GPU)
+        # 计算初始DFP中心
         self._compute_dfp_centers()
         
-        self.dfps_built = True
-        logging.info(f"Successfully built {self.num_dfp} DFPs with {N} global features on {self.device}")
+        logging.info("Initial DFP construction with covariance analysis completed")
         return True
+    
+    def _optimize_dfps_with_metric_learning(self, F_global: torch.Tensor, 
+                                          max_iterations: int, learning_rate: float) -> bool:
+        """第二步：通过度量学习优化DFP分配"""
+        N, D = F_global.shape
+        
+        # 初始化可优化的DFP中心
+        initial_centers = []
+        for dfp in self.dfps:
+            if dfp is not None and dfp.shape[0] > 0:
+                center = torch.mean(dfp, dim=0)
+                initial_centers.append(center)
+            else:
+                # 随机初始化空DFP的中心
+                center = torch.randn(D, device=self.device) * 0.1
+                initial_centers.append(center)
+        
+        dfp_centers = torch.stack(initial_centers, dim=0)  # [num_dfp, D]
+        dfp_centers.requires_grad_(True)
+        
+        # 优化器
+        optimizer = torch.optim.Adam([dfp_centers], lr=learning_rate)
+        
+        best_loss = float('inf')
+        patience = 10
+        no_improve_count = 0
+        
+        logging.info(f"Starting metric learning optimization for {max_iterations} iterations")
+        
+        for iteration in range(max_iterations):
+            optimizer.zero_grad()
+            
+            # 重新分配特征到最近的DFP中心
+            distances = torch.cdist(F_global, dfp_centers)  # [N, num_dfp]
+            assignments = torch.argmin(distances, dim=1)  # [N]
+            
+            # 计算池内紧凑性损失
+            compact_loss = self._compute_compactness_loss_from_assignments(F_global, assignments, dfp_centers)
+            
+            # 计算池间分离损失  
+            separate_loss = self._compute_separation_loss_from_centers(dfp_centers)
+            
+            # 总损失
+            total_loss = compact_loss + 0.1 * separate_loss  # 分离损失权重较小
+            
+            total_loss.backward()
+            optimizer.step()
+            
+            # 记录进度
+            if iteration % 10 == 0:
+                logging.info(f"Optimization iter {iteration}: total_loss={total_loss.item():.6f}, "
+                           f"compact={compact_loss.item():.6f}, separate={separate_loss.item():.6f}")
+            
+            # 早停检查
+            if total_loss.item() < best_loss:
+                best_loss = total_loss.item()
+                no_improve_count = 0
+            else:
+                no_improve_count += 1
+                if no_improve_count >= patience:
+                    logging.info(f"Early stopping at iteration {iteration}")
+                    break
+        
+        # 使用优化后的中心重新分配DFP
+        with torch.no_grad():
+            distances = torch.cdist(F_global, dfp_centers)
+            assignments = torch.argmin(distances, dim=1)
+            self._update_dfps_from_assignments(F_global, assignments)
+            self._compute_dfp_centers()
+        
+        logging.info("Metric learning optimization completed")
+        return True
+    
+    def _compute_compactness_loss_from_assignments(self, features: torch.Tensor, 
+                                                 assignments: torch.Tensor, centers: torch.Tensor) -> torch.Tensor:
+        """计算基于分配的池内紧凑性损失"""
+        total_loss = torch.tensor(0.0, device=self.device)
+        num_active_pools = 0
+        
+        for dfp_idx in range(self.num_dfp):
+            mask = assignments == dfp_idx
+            if mask.any():
+                pool_features = features[mask]  # [num_features_in_pool, D]
+                pool_center = centers[dfp_idx]  # [D]
+                
+                # 计算池内特征到中心的距离平方
+                distances_squared = torch.sum((pool_features - pool_center.unsqueeze(0)) ** 2, dim=1)
+                pool_loss = torch.mean(distances_squared)
+                total_loss = total_loss + pool_loss
+                num_active_pools += 1
+        
+        if num_active_pools > 0:
+            return total_loss / num_active_pools
+        else:
+            return torch.tensor(0.0, device=self.device)
+    
+    def _compute_separation_loss_from_centers(self, centers: torch.Tensor) -> torch.Tensor:
+        """计算基于中心的池间分离损失（Softplus版本）"""
+        total_loss = torch.tensor(0.0, device=self.device)
+        num_pairs = 0
+        margin = 1.0  # 适中的margin值
+        
+        for i in range(self.num_dfp):
+            for j in range(i + 1, self.num_dfp):
+                center_i = centers[i]  # [D]
+                center_j = centers[j]  # [D]
+                
+                # 计算中心间距离的平方
+                distance_squared = torch.sum((center_i - center_j) ** 2)
+                
+                # Softplus分离损失
+                separation_loss = torch.nn.functional.softplus(margin - distance_squared)
+                total_loss = total_loss + separation_loss
+                num_pairs += 1
+        
+        if num_pairs > 0:
+            return total_loss / num_pairs
+        else:
+            return torch.tensor(0.0, device=self.device)
+    
+    def _update_dfps_from_assignments(self, features: torch.Tensor, assignments: torch.Tensor):
+        """根据分配更新DFP内容"""
+        dfp_lists = []
+        for dfp_idx in range(self.num_dfp):
+            mask = assignments == dfp_idx
+            if mask.any():
+                dfp_features = features[mask].clone()
+                dfp_lists.append(dfp_features)
+            else:
+                # 空DFP，使用全局特征的随机子集
+                subset_size = max(1, features.shape[0] // (self.num_dfp * 2))
+                random_indices = torch.randperm(features.shape[0], device=self.device)[:subset_size]
+                dfp_features = features[random_indices].clone()
+                dfp_lists.append(dfp_features)
+        
+        self.dfps = dfp_lists
+    
+    def _compute_current_metric_losses(self) -> Tuple[float, float]:
+        """计算当前DFP的度量学习损失"""
+        if not self.dfps_built:
+            return 0.0, 0.0
+        
+        # 构建虚拟的batch_features_by_dfp用于计算紧凑性损失
+        batch_features_by_dfp = {}
+        for dfp_idx, dfp in enumerate(self.dfps):
+            if dfp is not None and dfp.shape[0] > 0:
+                # 取前几个特征作为样本
+                sample_size = min(32, dfp.shape[0])
+                sample_features = dfp[:sample_size]
+                batch_features_by_dfp[dfp_idx] = sample_features
+        
+        compact_loss = self.compute_intra_pool_compactness_loss(batch_features_by_dfp)
+        separate_loss = self.compute_inter_pool_separation_loss(margin=1.0)
+        
+        return compact_loss.item(), separate_loss.item()
     
     def _assign_features_to_dfps(self, F_global: torch.Tensor):
         """将全局特征分配到不同的DFP中 (GPU版本)"""
@@ -229,17 +418,22 @@ class CovarianceDynamicFeaturePool:
         
         return result_features
     
-    def reconstruct_dfps(self) -> bool:
-        """重构DFP（可选的周期性操作）
+    def reconstruct_dfps(self, max_optimization_iterations: int = 30, learning_rate: float = 0.01) -> bool:
+        """重构DFP（可选的周期性操作）- 使用度量学习优化
         
+        Args:
+            max_optimization_iterations: 重构时的优化迭代次数（相对较少）
+            learning_rate: 重构时的学习率
+            
         Returns:
             bool: 是否成功重构
         """
         if len(self.global_features) == 0:
             return False
             
-        logging.info("Reconstructing DFPs...")
-        return self.build_dfps()
+        logging.info("Reconstructing DFPs with metric learning optimization...")
+        return self.build_dfps(max_optimization_iterations=max_optimization_iterations, 
+                              learning_rate=learning_rate)
     
     def get_statistics(self) -> dict:
         """获取统计信息"""

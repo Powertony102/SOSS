@@ -222,12 +222,14 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
         'lambda_c': lambda_c
     }
 
-def train_stage_two_build_dfp(cov_dfp):
-    """阶段二：构建DFP并生成Selector训练目标"""
-    success = cov_dfp.build_dfps()
+def train_stage_two_build_dfp(cov_dfp, max_optimization_iterations=50, learning_rate=0.01):
+    """阶段二：构建DFP并生成Selector训练目标 - 度量学习驱动"""
+    logging.info(f"Building DFPs with metric learning: max_iter={max_optimization_iterations}, lr={learning_rate}")
+    success = cov_dfp.build_dfps(max_optimization_iterations=max_optimization_iterations, 
+                                learning_rate=learning_rate)
     if success:
         stats = cov_dfp.get_statistics()
-        logging.info(f"DFP construction successful: {stats}")
+        logging.info(f"Metric-learning driven DFP construction successful: {stats}")
         return True
     else:
         logging.warning("DFP construction failed")
