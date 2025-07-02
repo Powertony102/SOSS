@@ -29,10 +29,11 @@ from torchvision import transforms
 from myutils import ramps, losses, test_patch
 from myutils.cov_dynamic_feature_pool import CovarianceDynamicFeaturePool
 from myutils.hcc_loss import hierarchical_coral, parse_hcc_weights
+from myutils.covariance_utils import compute_covariance, patchwise_covariance
+from myutils.new_correlation_CORAL import coral_loss
 from dataloaders.acdc_dataset import ACDCDataSet, RandomGenerator, TwoStreamBatchSampler
+from dataloaders.data_utils import ACDCDataProcessor
 from networks.net_factory import net_factory
-from dataloaders.data_utils import ACDCDataProcessor  # 导入数据处理工具
-from myutils.covariance_utils import compute_covariance_matrix, coral_loss
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
