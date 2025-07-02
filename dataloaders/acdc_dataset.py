@@ -194,6 +194,7 @@ class RandomGenerator(object):
         self.output_size = output_size
 
     def __call__(self, sample):
+        # 提取图像和标签进行处理
         image, label = sample['image'], sample['label']
         
         # 随机旋转
@@ -233,8 +234,12 @@ class RandomGenerator(object):
                 # 如果是one-hot编码，转换为类别索引
                 label = np.argmax(label, axis=-1)
         
-        sample = {'image': image, 'label': label}
-        return sample
+        # 创建新的sample字典，保持所有原有字段
+        result_sample = sample.copy()  # 复制原始sample保持所有元数据
+        result_sample['image'] = image  # 更新处理后的图像
+        result_sample['label'] = label  # 更新处理后的标签
+        
+        return result_sample
 
 
 class TwoStreamBatchSampler(object):
