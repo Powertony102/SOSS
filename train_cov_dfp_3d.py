@@ -73,6 +73,11 @@ parser.add_argument('--dfp_reconstruct_interval', type=int, default=1000, help='
 parser.add_argument('--max_global_features', type=int, default=50000, help='maximum global features')
 parser.add_argument('--embedding_dim', type=int, default=64, help='embedding dimension')
 
+# 度量学习参数（新增）
+parser.add_argument('--lambda_compact', type=float, default=0.1, help='weight for intra-pool compactness loss')
+parser.add_argument('--lambda_separate', type=float, default=0.05, help='weight for inter-pool separation loss')
+parser.add_argument('--separation_margin', type=float, default=1.0, help='margin for inter-pool separation loss')
+
 # 其他参数
 parser.add_argument('--use_wandb', action='store_true', help='use wandb for logging')
 parser.add_argument('--wandb_project', type=str, default='Cov-DFP', help='wandb project name')
@@ -97,12 +102,14 @@ args = parser.parse_args()
 # Parse HCC weights
 hcc_weights = parse_hcc_weights(args.hcc_weights, num_layers=5)
 
-snapshot_path = "./model/LA_{}_{}_dfp{}_memory{}_feat{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}/{}".format(
+snapshot_path = "./model/LA_{}_{}_dfp{}_memory{}_feat{}_compact{}_separate{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}/{}".format(
     args.exp,
     args.labelnum,
     args.num_dfp,
     args.memory_num,
     args.embedding_dim,
+    args.lambda_compact,
+    args.lambda_separate,
     args.num_filtered,
     args.consistency,
     args.consistency_rampup,
@@ -334,21 +341,63 @@ def train_stage_three_main(model, sampled_batch, optimizer, consistency_criterio
                                 metric=args.hcc_metric,
                                 scale=args.hcc_scale)
 
+    # 度量学习损失 (新增)
+    loss_compact = torch.tensor(0.0, device=device, requires_grad=True)
+    loss_separate = torch.tensor(0.0, device=device, requires_grad=True)
+    
+    if args.use_dfp and cov_dfp is not None and cov_dfp.dfps_built:
+        # 获取区域特征用于度量学习损失计算
+        region_features_v = embedding_v[:args.labeled_bs, ...]
+        region_features_a = embedding_a[:args.labeled_bs, ...]
+        
+        # 转换格式并投影
+        region_features_v = region_features_v.permute(0, 2, 3, 4, 1).contiguous()
+        region_features_a = region_features_a.permute(0, 2, 3, 4, 1).contiguous()
+        
+        # 获取投影特征（需要暂时切换到eval模式）
+        model.eval()
+        proj_region_features_v = model.projection_head1(region_features_v.view(-1, region_features_v.shape[-1]))
+        proj_region_features_a = model.projection_head2(region_features_a.view(-1, region_features_a.shape[-1]))
+        model.train()
+        
+        # 平均两个分支的特征
+        combined_region_features = (proj_region_features_v + proj_region_features_a) / 2  # [N, D]
+        
+        # 使用Selector预测DFP分配
+        with torch.no_grad():
+            dfp_predictions = model.dfp_selector.predict_dfp(combined_region_features)  # [N]
+        
+        # 按DFP分组特征
+        batch_features_by_dfp = cov_dfp.group_features_by_dfp_predictions(
+            combined_region_features, dfp_predictions
+        )
+        
+        # 计算度量学习损失
+        loss_compact, loss_separate = cov_dfp.compute_metric_learning_losses(
+            batch_features_by_dfp, margin=args.separation_margin
+        )
+
     lambda_c = get_lambda_c(iter_num // 150)
-    total_loss = args.lamda * loss_s + lambda_c * loss_c + args.lambda_hcc * loss_hcc
+    total_loss = (args.lamda * loss_s + 
+                  lambda_c * loss_c + 
+                  args.lambda_hcc * loss_hcc + 
+                  args.lambda_compact * loss_compact + 
+                  args.lambda_separate * loss_separate)
 
     optimizer.zero_grad()
     total_loss.backward()
     optimizer.step()
 
-    logging.info('Stage 3B - Main training iter %d : loss : %03f, loss_s: %03f, loss_c: %03f, loss_hcc: %03f' % (
-        iter_num, total_loss, loss_s, loss_c, loss_hcc))
+    logging.info('Stage 3B - Main training iter %d : loss : %03f, loss_s: %03f, loss_c: %03f, loss_hcc: %03f, loss_compact: %03f, loss_separate: %03f' % (
+        iter_num, total_loss, loss_s, loss_c, loss_hcc, loss_compact, loss_separate))
     
     return {
         'total_loss': total_loss.item(),
         'loss_s': loss_s.item(),
         'loss_c': loss_c.item(),
         'loss_hcc': loss_hcc.item(),
+        'loss_compact': loss_compact.item(),
+        'loss_separate': loss_separate.item(),
         'lambda_c': lambda_c
     }
 
@@ -370,8 +419,8 @@ if __name__ == "__main__":
             project=args.wandb_project,
             entity=args.wandb_entity,
             config=vars(args),
-            name=f"{args.exp}_{args.model}_dfp{args.num_dfp}_feat{args.embedding_dim}",
-            tags=[args.dataset_name, "cov_dfp", f"dfp_{args.num_dfp}"]
+            name=f"{args.exp}_{args.model}_dfp{args.num_dfp}_feat{args.embedding_dim}_compact{args.lambda_compact}_separate{args.lambda_separate}",
+            tags=[args.dataset_name, "cov_dfp", f"dfp_{args.num_dfp}", "metric_learning"]
         )
         logging.info(f"Wandb initialized with project: {args.wandb_project}")
 
@@ -576,6 +625,10 @@ if __name__ == "__main__":
                             'train/loss_supervised': metrics['loss_s'],
                             'train/loss_consistency': metrics['loss_c'],
                             'train/loss_hcc': metrics['loss_hcc'],
+                            'train/loss_compact': metrics['loss_compact'],
+                            'train/loss_separate': metrics['loss_separate'],
+                            'train/lambda_compact': args.lambda_compact,
+                            'train/lambda_separate': args.lambda_separate,
                             'selector_trained': selector_trained,
                             'iteration': iter_num
                         })

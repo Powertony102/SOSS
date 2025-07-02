@@ -260,3 +260,127 @@ class CovarianceDynamicFeaturePool:
             })
         
         return stats 
+    
+    def compute_intra_pool_compactness_loss(self, batch_features_by_dfp: dict) -> torch.Tensor:
+        """计算池内紧凑性损失 (Intra-Pool Compactness Loss)
+        
+        公式: L_compact_j = (1/|B_j|) * sum_{f in B_j} ||f - μ_{B_j}||_2^2
+        总损失: L_compact = sum_{j s.t. B_j != ∅} L_compact_j
+        
+        Args:
+            batch_features_by_dfp: dict {dfp_idx: features_tensor}
+                其中 features_tensor 形状为 [num_features_in_batch, D]
+        
+        Returns:
+            compactness_loss: 标量张量
+        """
+        if not batch_features_by_dfp:
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        
+        total_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+        active_pools = 0
+        
+        for dfp_idx, batch_features in batch_features_by_dfp.items():
+            if batch_features is None or batch_features.numel() == 0:
+                continue
+                
+            # 确保特征在正确的设备上
+            features_gpu = batch_features.to(self.device)  # [num_features_in_batch, D]
+            batch_size = features_gpu.shape[0]
+            
+            if batch_size == 0:
+                continue
+            
+            # 计算批次中心 μ_{B_j}
+            batch_center = torch.mean(features_gpu, dim=0)  # [D]
+            
+            # 计算池内紧凑性损失: (1/|B_j|) * sum_{f in B_j} ||f - μ_{B_j}||_2^2
+            distances_squared = torch.sum((features_gpu - batch_center.unsqueeze(0)) ** 2, dim=1)  # [num_features_in_batch]
+            pool_compactness_loss = torch.mean(distances_squared)  # 平均距离的平方
+            
+            total_loss = total_loss + pool_compactness_loss
+            active_pools += 1
+        
+        # 返回平均损失，避免池数量对损失大小的影响
+        if active_pools > 0:
+            return total_loss / active_pools
+        else:
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+    
+    def compute_inter_pool_separation_loss(self, margin: float = 1.0) -> torch.Tensor:
+        """计算池间分离性损失 (Inter-Pool Separation Loss)
+        
+        公式: L_separate = sum_{i=1}^{num_dfp} sum_{j=i+1}^{num_dfp} max(0, m - ||μ_i - μ_j||_2^2)
+        
+        Args:
+            margin: 分离边际 m，默认为1.0
+        
+        Returns:
+            separation_loss: 标量张量
+        """
+        if not self.dfps_built or self.dfp_centers is None:
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        
+        total_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+        num_pairs = 0
+        
+        # 计算所有池对之间的分离损失
+        for i in range(self.num_dfp):
+            for j in range(i + 1, self.num_dfp):
+                # 计算两个DFP中心之间的L2距离的平方
+                center_i = self.dfp_centers[i]  # [D]
+                center_j = self.dfp_centers[j]  # [D]
+                
+                distance_squared = torch.sum((center_i - center_j) ** 2)
+                
+                # 使用hinge loss: max(0, margin - distance_squared)
+                separation_loss = torch.relu(margin - distance_squared)
+                
+                total_loss = total_loss + separation_loss
+                num_pairs += 1
+        
+        # 返回平均损失
+        if num_pairs > 0:
+            return total_loss / num_pairs
+        else:
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+    
+    def compute_metric_learning_losses(self, batch_features_by_dfp: dict, 
+                                     margin: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor]:
+        """计算度量学习相关的两个损失函数
+        
+        Args:
+            batch_features_by_dfp: dict {dfp_idx: features_tensor}
+            margin: 池间分离的边际参数
+        
+        Returns:
+            tuple: (intra_pool_compactness_loss, inter_pool_separation_loss)
+        """
+        compactness_loss = self.compute_intra_pool_compactness_loss(batch_features_by_dfp)
+        separation_loss = self.compute_inter_pool_separation_loss(margin)
+        
+        return compactness_loss, separation_loss
+    
+    def group_features_by_dfp_predictions(self, features: torch.Tensor, 
+                                        dfp_predictions: torch.Tensor) -> dict:
+        """根据Selector的预测将特征按DFP分组
+        
+        Args:
+            features: 形状 [batch_size, D] 的特征张量
+            dfp_predictions: 形状 [batch_size] 的DFP索引预测
+        
+        Returns:
+            dict: {dfp_idx: features_tensor} 按DFP分组的特征
+        """
+        batch_features_by_dfp = {}
+        
+        for dfp_idx in range(self.num_dfp):
+            # 找到被分配到当前DFP的特征
+            mask = dfp_predictions == dfp_idx
+            if mask.any():
+                selected_features = features[mask]  # [num_selected, D]
+                batch_features_by_dfp[dfp_idx] = selected_features
+            else:
+                batch_features_by_dfp[dfp_idx] = None
+        
+        return batch_features_by_dfp 
