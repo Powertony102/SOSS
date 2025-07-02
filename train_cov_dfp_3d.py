@@ -102,7 +102,7 @@ args = parser.parse_args()
 # Parse HCC weights
 hcc_weights = parse_hcc_weights(args.hcc_weights, num_layers=5)
 
-snapshot_path = "./model/LA_{}_{}_dfp{}_memory{}_feat{}_compact{}_separate{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}/{}".format(
+snapshot_path = "./model/LA_{}_{}_dfp{}_memory{}_feat{}_compact{}_separate{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}".format(
     args.exp,
     args.labelnum,
     args.num_dfp,
@@ -115,8 +115,7 @@ snapshot_path = "./model/LA_{}_{}_dfp{}_memory{}_feat{}_compact{}_separate{}_lab
     args.consistency_rampup,
     args.consistency_o,
     args.max_iteration,
-    args.seed,
-    args.model)
+    args.seed)
 
 num_classes = 2
 if args.dataset_name == "LA":
