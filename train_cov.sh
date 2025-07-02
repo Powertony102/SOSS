@@ -18,7 +18,7 @@ python3 train_cov_dfp_3d.py \
   --gpu 0 \
   --use_dfp \
   --num_dfp 8 \
-  # --use_wandb \
+  --use_wandb \
   --wandb_project SOSS \
   --dfp_start_iter 2000 \
   --selector_train_iter 500 \

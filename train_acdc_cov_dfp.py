@@ -14,6 +14,10 @@ import numpy as np
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
 import wandb
+import time
+import math
+import itertools
+import warnings
 
 import torch
 import torch.optim as optim
@@ -27,6 +31,10 @@ from myutils.cov_dynamic_feature_pool import CovarianceDynamicFeaturePool
 from myutils.hcc_loss import hierarchical_coral, parse_hcc_weights
 from dataloaders.acdc_dataset import ACDCDataSet, RandomGenerator, TwoStreamBatchSampler
 from networks.net_factory import net_factory
+from dataloaders.data_utils import ACDCDataProcessor  # 导入数据处理工具
+from myutils.covariance_utils import compute_covariance_matrix, coral_loss
+
+warnings.filterwarnings("ignore", category=UserWarning)
 
 def get_lambda_c(epoch):
     return args.consistency * ramps.sigmoid_rampup(epoch, args.consistency_rampup)
@@ -145,7 +153,7 @@ if args.deterministic:
     np.random.seed(args.seed)
 
 def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice_loss, 
-                   cov_dfp, iter_num, writer=None):
+                   cov_dfp, iter_num, writer=None, data_processor=None):
     """阶段一：初始预训练
     
     目标：训练初步的主模型，建立全局特征池
@@ -154,21 +162,11 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
     volume_batch, label_batch, idx = sampled_batch['image'], sampled_batch['label'], sampled_batch['idx']
     volume_batch, label_batch, idx = volume_batch.cuda(), label_batch.cuda(), idx.cuda()
 
-    # 数据形状检查和修复
-    print(f"DEBUG: 原始数据形状 - volume_batch: {volume_batch.shape}, label_batch: {label_batch.shape}")
-    
-    # 确保输入是正确的格式：[B, 1, H, W]
-    if len(volume_batch.shape) == 4:
-        if volume_batch.shape[1] == 4:  # 如果有4个通道，只取第一个通道
-            print(f"WARNING: 检测到4通道输入，只使用第一个通道")
-            volume_batch = volume_batch[:, 0:1, :, :]  # 只取第一个通道
-        elif volume_batch.shape[1] != 1:
-            print(f"WARNING: 通道数异常 {volume_batch.shape[1]}，重新调整为1通道")
-            volume_batch = volume_batch[:, 0:1, :, :]
-    elif len(volume_batch.shape) == 3:  # [B, H, W] -> [B, 1, H, W]
-        volume_batch = volume_batch.unsqueeze(1)
-    
-    print(f"DEBUG: 修正后数据形状 - volume_batch: {volume_batch.shape}, label_batch: {label_batch.shape}")
+    # 使用专门的数据处理器进行数据检查和修复
+    if data_processor is not None:
+        volume_batch, label_batch, validation = data_processor.process_batch(volume_batch, label_batch)
+        if not validation['valid']:
+            print(f"数据验证失败: {validation['errors']}")
     
     # 直接使用2D数据进行前向传播
     model_output = model(volume_batch, with_hcc=True)
@@ -282,7 +280,7 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
     return total_loss.item()
 
 def train_stage_two(model, sampled_batch, optimizer, selector_optimizer, consistency_criterion, 
-                   dice_loss, cov_dfp, iter_num, writer=None):
+                   dice_loss, cov_dfp, iter_num, writer=None, data_processor=None):
     """阶段二：DFP构建与度量学习训练
     
     目标：构建动态特征池，训练选择器网络，执行度量学习
@@ -291,14 +289,11 @@ def train_stage_two(model, sampled_batch, optimizer, selector_optimizer, consist
     volume_batch, label_batch, idx = sampled_batch['image'], sampled_batch['label'], sampled_batch['idx']
     volume_batch, label_batch, idx = volume_batch.cuda(), label_batch.cuda(), idx.cuda()
 
-    # 数据形状检查和修复（与stage_one相同）
-    if len(volume_batch.shape) == 4:
-        if volume_batch.shape[1] == 4:  # 如果有4个通道，只取第一个通道
-            volume_batch = volume_batch[:, 0:1, :, :]  # 只取第一个通道
-        elif volume_batch.shape[1] != 1:
-            volume_batch = volume_batch[:, 0:1, :, :]
-    elif len(volume_batch.shape) == 3:  # [B, H, W] -> [B, 1, H, W]
-        volume_batch = volume_batch.unsqueeze(1)
+    # 使用专门的数据处理器进行数据检查和修复
+    if data_processor is not None:
+        volume_batch, label_batch, validation = data_processor.process_batch(volume_batch, label_batch)
+        if not validation['valid']:
+            print(f"数据验证失败: {validation['errors']}")
 
     # 前向传播 - 直接使用2D数据
     model_output = model(volume_batch, with_hcc=True)
@@ -524,6 +519,10 @@ if __name__ == "__main__":
     writer = SummaryWriter(snapshot_path + '/log') if not args.use_wandb else None
     logging.info("{} iterations per epoch".format(len(trainloader)))
     
+    # 创建ACDC数据处理器
+    data_processor = ACDCDataProcessor(expected_classes=num_classes, verbose=True)
+    print(f"创建了ACDC数据处理器，期望类别数: {num_classes}")
+    
     consistency_criterion = losses.mse_loss
     
     # 创建简单的二元Dice损失函数
@@ -559,17 +558,21 @@ if __name__ == "__main__":
             if not args.use_dfp or iter_num < args.dfp_start_iter:
                 # 阶段一：基础训练
                 loss = train_stage_one(model, sampled_batch, optimizer, consistency_criterion, 
-                                     dice_loss, cov_dfp, iter_num, writer)
+                                     dice_loss, cov_dfp, iter_num, writer, data_processor)
             else:
                 # 阶段二：DFP训练
                 loss = train_stage_two(model, sampled_batch, optimizer, selector_optimizer,
-                                     consistency_criterion, dice_loss, cov_dfp, iter_num, writer)
+                                     consistency_criterion, dice_loss, cov_dfp, iter_num, writer, data_processor)
 
             iter_num += 1
             
             # 日志记录
             if iter_num % 50 == 0:
                 logging.info(f'iteration {iter_num}: loss: {loss:.4f}, lr: {lr_:.6f}')
+                # 打印数据处理统计
+                stats = data_processor.get_stats()
+                if stats['shape_fixes'] > 0:
+                    logging.info(f'数据处理统计: {stats}')
 
             # 保存模型
             if iter_num % 2000 == 0:
@@ -587,6 +590,10 @@ if __name__ == "__main__":
     save_mode_path = os.path.join(snapshot_path, 'iter_' + str(max_iterations) + '.pth')
     torch.save(model.state_dict(), save_mode_path)
     logging.info("save final model to {}".format(save_mode_path))
+    
+    # 打印最终统计
+    final_stats = data_processor.get_stats()
+    logging.info(f"训练完成，数据处理最终统计: {final_stats}")
     
     if writer:
         writer.close()
