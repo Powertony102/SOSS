@@ -31,10 +31,60 @@ from myutils.cov_dynamic_feature_pool import CovarianceDynamicFeaturePool
 from myutils.hcc_loss import hierarchical_coral, parse_hcc_weights
 from myutils.covariance_utils import compute_covariance, patchwise_covariance
 from myutils.new_correlation_CORAL import coral_loss
-from dataloaders.acdc_dataset import ACDCDataSet, RandomGenerator, TwoStreamBatchSampler
+from dataloaders.acdc_dataset import ACDCDataSet, RandomGenerator, TwoStreamBatchSampler, ToTensor
 from networks.net_factory import net_factory
 
 warnings.filterwarnings("ignore", category=UserWarning)
+
+def validate_model(model, val_loader, num_classes=4, device='cuda'):
+    """验证模型性能"""
+    model.eval()
+    total_dice = 0.0
+    class_dices = [0.0] * (num_classes - 1)  # 跳过背景类
+    total_samples = 0
+    
+    with torch.no_grad():
+        for sampled_batch in val_loader:
+            volume_batch, label_batch = sampled_batch['image'], sampled_batch['label']
+            volume_batch, label_batch = volume_batch.to(device), label_batch.to(device)
+            
+            outputs = model(volume_batch)
+            if isinstance(outputs, dict):
+                output = outputs['seg1']
+            elif isinstance(outputs, (list, tuple)):
+                output = outputs[0]
+            else:
+                output = outputs
+                
+            pred = torch.softmax(output, dim=1)
+            pred_mask = torch.argmax(pred, dim=1)
+            
+            # 计算每个样本的Dice
+            for i in range(volume_batch.shape[0]):
+                sample_pred = pred_mask[i].cpu().numpy()
+                sample_gt = label_batch[i].cpu().numpy()
+                
+                for class_idx in range(1, num_classes):
+                    pred_binary = (sample_pred == class_idx).astype(np.float32)
+                    gt_binary = (sample_gt == class_idx).astype(np.float32)
+                    
+                    intersection = (pred_binary * gt_binary).sum()
+                    union = pred_binary.sum() + gt_binary.sum()
+                    
+                    if union > 0:
+                        dice = 2.0 * intersection / union
+                        class_dices[class_idx - 1] += dice
+                
+                total_samples += 1
+    
+    if total_samples > 0:
+        avg_class_dices = [d / total_samples for d in class_dices]
+        total_dice = sum(avg_class_dices) / len(avg_class_dices)
+    else:
+        avg_class_dices = [0.0] * (num_classes - 1)
+        total_dice = 0.0
+    
+    return total_dice, avg_class_dices
 
 def get_lambda_c(epoch):
     return args.consistency * ramps.sigmoid_rampup(epoch, args.consistency_rampup)
@@ -51,7 +101,7 @@ parser = argparse.ArgumentParser()
 # 基础参数
 parser.add_argument('--dataset_name', type=str, default='ACDC', help='dataset_name')
 parser.add_argument('--root_path', type=str, default='./', help='Root path of the project')
-parser.add_argument('--dataset_path', type=str, default='/home/jovyan/work/medical_dataset/ACDC', help='Path to the ACDC dataset')
+parser.add_argument('--dataset_path', type=str, default='/home/jovyan/work/medical_dataset/ACDC_processed', help='Path to the ACDC dataset')
 parser.add_argument('--exp', type=str, default='acdc_soss', help='exp_name')
 parser.add_argument('--model', type=str, default='corn2d', help='model_name: unet, vnet, corn, corn2d')
 parser.add_argument('--max_iteration', type=int, default=20000, help='maximum iteration to train')
@@ -498,6 +548,15 @@ if __name__ == "__main__":
     print(f"训练数据集加载完成，总切片数: {len(db_train)}")
     print(f"使用标注切片数: {labeled_slices_count}")
     
+    # 创建验证数据加载器
+    db_val = ACDCDataSet(base_dir=train_data_path,
+                        list_dir=None,
+                        split='val',
+                        transform=ToTensor())
+    
+    valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=1)
+    print(f"验证数据集加载完成，总切片数: {len(db_val)}")
+    
     # 半监督学习的数据索引
     labeled_idxs = list(range(labeled_slices_count))  # 前labeled_slices_count个是标注数据
     unlabeled_idxs = list(range(labeled_slices_count, len(db_train)))  # 剩余的是未标注数据
@@ -567,6 +626,10 @@ if __name__ == "__main__":
     selector_train_counter = 0
     last_dfp_reconstruct_iter = 0
     
+    # 验证相关
+    best_val_dice = 0.0
+    val_frequency = 500  # 每500次迭代验证一次
+    
     iterator = tqdm(range(max_epoch), ncols=70)
     for epoch_num in iterator:
         for i_batch, sampled_batch in enumerate(trainloader):
@@ -590,6 +653,31 @@ if __name__ == "__main__":
             # 日志记录
             if iter_num % 50 == 0:
                 logging.info(f'iteration {iter_num}: loss: {loss:.4f}, lr: {lr_:.6f}')
+
+            # 验证模型
+            if iter_num % val_frequency == 0:
+                val_dice, class_dices = validate_model(model, valloader, num_classes)
+                model.train()  # 切换回训练模式
+                
+                logging.info(f'Validation at iter {iter_num}: Overall Dice = {val_dice:.4f}')
+                logging.info(f'Class Dices: LV={class_dices[0]:.4f}, RV={class_dices[1]:.4f}, MYO={class_dices[2]:.4f}')
+                
+                # 保存最佳模型
+                if val_dice > best_val_dice:
+                    best_val_dice = val_dice
+                    best_model_path = os.path.join(snapshot_path, 'best_model.pth')
+                    torch.save(model.state_dict(), best_model_path)
+                    logging.info(f"保存最佳模型到 {best_model_path}，Dice = {val_dice:.4f}")
+                
+                if args.use_wandb:
+                    wandb.log({
+                        'val/overall_dice': val_dice,
+                        'val/lv_dice': class_dices[0],
+                        'val/rv_dice': class_dices[1],
+                        'val/myo_dice': class_dices[2],
+                        'val/best_dice': best_val_dice,
+                        'iteration': iter_num
+                    })
 
             # 保存模型
             if iter_num % 2000 == 0:
