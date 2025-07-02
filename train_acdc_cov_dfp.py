@@ -154,8 +154,11 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
     volume_batch, label_batch, idx = sampled_batch['image'], sampled_batch['label'], sampled_batch['idx']
     volume_batch, label_batch, idx = volume_batch.cuda(), label_batch.cuda(), idx.cuda()
 
-    # 对于2D ACDC数据，确保输入维度正确
+    # 对于2D ACDC数据，转换为3D格式以适配3D卷积模型
     if len(volume_batch.shape) == 4:  # [B, C, H, W]
+        # 添加深度维度：[B, C, H, W] -> [B, C, 1, H, W]
+        volume_batch = volume_batch.unsqueeze(2)
+        
         model_output = model(volume_batch, with_hcc=True)
         if isinstance(model_output, dict):
             outputs_v = model_output['seg1']
@@ -166,6 +169,19 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
             features_a = model_output['features2']
         else:
             outputs_v, outputs_a, embedding_v, embedding_a, features_v, features_a = model_output
+        
+        # 移除添加的深度维度：[B, C, 1, H, W] -> [B, C, H, W]
+        outputs_v = outputs_v.squeeze(2)
+        outputs_a = outputs_a.squeeze(2)
+        if len(embedding_v.shape) == 5:
+            embedding_v = embedding_v.squeeze(2)
+        if len(embedding_a.shape) == 5:
+            embedding_a = embedding_a.squeeze(2)
+        # 处理features列表的维度
+        if features_v and len(features_v[0].shape) == 5:
+            features_v = [f.squeeze(2) for f in features_v]
+        if features_a and len(features_a[0].shape) == 5:
+            features_a = [f.squeeze(2) for f in features_a]
     else:
         raise ValueError(f"Unexpected input shape: {volume_batch.shape}")
         
@@ -275,7 +291,11 @@ def train_stage_two(model, sampled_batch, optimizer, selector_optimizer, consist
     volume_batch, label_batch, idx = sampled_batch['image'], sampled_batch['label'], sampled_batch['idx']
     volume_batch, label_batch, idx = volume_batch.cuda(), label_batch.cuda(), idx.cuda()
 
-    # 前向传播
+    # 前向传播 - 适配2D到3D
+    if len(volume_batch.shape) == 4:  # [B, C, H, W]
+        # 添加深度维度：[B, C, H, W] -> [B, C, 1, H, W]
+        volume_batch = volume_batch.unsqueeze(2)
+    
     model_output = model(volume_batch, with_hcc=True)
     if isinstance(model_output, dict):
         outputs_v = model_output['seg1']
@@ -286,6 +306,20 @@ def train_stage_two(model, sampled_batch, optimizer, selector_optimizer, consist
         features_a = model_output['features2']
     else:
         outputs_v, outputs_a, embedding_v, embedding_a, features_v, features_a = model_output
+    
+    # 移除添加的深度维度：[B, C, 1, H, W] -> [B, C, H, W]
+    if len(outputs_v.shape) == 5:
+        outputs_v = outputs_v.squeeze(2)
+        outputs_a = outputs_a.squeeze(2)
+    if len(embedding_v.shape) == 5:
+        embedding_v = embedding_v.squeeze(2)
+    if len(embedding_a.shape) == 5:
+        embedding_a = embedding_a.squeeze(2)
+    # 处理features列表的维度
+    if features_v and len(features_v[0].shape) == 5:
+        features_v = [f.squeeze(2) for f in features_v]
+    if features_a and len(features_a[0].shape) == 5:
+        features_a = [f.squeeze(2) for f in features_a]
     
     # 构建DFPs
     if not cov_dfp.dfps_built and cov_dfp.get_global_pool_size() > args.num_dfp * 10:
