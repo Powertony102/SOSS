@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# 运行Cov-DFP训练脚本
+# 运行 SOSS 训练脚本
 # 注意：请根据你的实际环境修改数据集路径
 
 # 激活虚拟环境（如果有的话）
@@ -25,13 +25,13 @@ python3 train_cov_dfp_3d.py \
   --gpu 0 \
   --use_dfp \
   --num_dfp 8 \
-  --dfp_start_iter 200 \
-  --selector_train_iter 50 \
-  --dfp_reconstruct_interval 1000 \
+  --dfp_start_iter 1000 \
+  --selector_train_iter 250 \
+  --dfp_reconstruct_interval 2000 \
   --max_global_features 50000 \
-  --embedding_dim 64 \
+  --embedding_dim 128 \
   --use_wandb \
-  --wandb_project Cov-DFP-Debug \
+  --wandb_project SOSS \
   --consistency 1.0 \
   --consistency_rampup 40.0 \
   --lambda_hcc 0.1 \
@@ -41,5 +41,3 @@ python3 train_cov_dfp_3d.py \
   --temperature 0.4 \
   --lamda 0.5 \
   --consistency_o 0.05
-
-echo "训练完成!" 
