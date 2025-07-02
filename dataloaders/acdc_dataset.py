@@ -127,14 +127,19 @@ class ACDCDataSet(Dataset):
         image_array = sample['image']
         label_array = sample['label']
         
-        # 确保数组是连续的，解决负步长问题
-        if not image_array.flags['C_CONTIGUOUS']:
-            image_array = image_array.copy()
-        if not label_array.flags['C_CONTIGUOUS']:
-            label_array = label_array.copy()
-            
-        image = torch.from_numpy(image_array).float()
-        label = torch.from_numpy(label_array).long()
+        # 检查是否已经是张量（ToTensor变换会产生张量）
+        if isinstance(image_array, torch.Tensor):
+            image = image_array.float()
+            label = label_array.long()
+        else:
+            # 确保数组是连续的，解决负步长问题
+            if not image_array.flags['C_CONTIGUOUS']:
+                image_array = image_array.copy()
+            if not label_array.flags['C_CONTIGUOUS']:
+                label_array = label_array.copy()
+                
+            image = torch.from_numpy(image_array).float()
+            label = torch.from_numpy(label_array).long()
         
         # 最终验证格式
         if len(image.shape) != 3 or image.shape[0] != 1:
@@ -327,5 +332,32 @@ class ToTensor(object):
     """转换为张量"""
     def __call__(self, sample):
         image = sample['image']
-        image = image.reshape(1, image.shape[0], image.shape[1], image.shape[2]).astype(np.float32)
-        return {'image': torch.from_numpy(image), 'label': torch.from_numpy(sample['label']).long()} 
+        label = sample['label']
+        
+        # 确保图像格式正确 [1, H, W]
+        if len(image.shape) == 2:
+            image = image[np.newaxis, ...]  # [H, W] -> [1, H, W]
+        elif len(image.shape) == 3 and image.shape[0] != 1:
+            if image.shape[-1] == 1:
+                image = image[..., 0]  # [H, W, 1] -> [H, W]
+                image = image[np.newaxis, ...]  # [H, W] -> [1, H, W]
+            else:
+                image = np.mean(image, axis=-1)  # 多通道转单通道
+                image = image[np.newaxis, ...]
+        
+        # 确保标签格式正确 [H, W]
+        if len(label.shape) == 3:
+            if label.shape[0] == 1:
+                label = label[0, ...]  # [1, H, W] -> [H, W]
+            elif label.shape[-1] == 1:
+                label = label[..., 0]  # [H, W, 1] -> [H, W]
+            else:
+                # 如果是one-hot编码，转换为类别索引
+                label = np.argmax(label, axis=-1)
+        
+        # 创建新的sample字典，保持所有原有字段
+        result_sample = sample.copy()  # 复制原始sample保持所有元数据
+        result_sample['image'] = torch.from_numpy(image.astype(np.float32))
+        result_sample['label'] = torch.from_numpy(label.astype(np.int64))
+        
+        return result_sample 

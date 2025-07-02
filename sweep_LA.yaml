@@ -1,3 +1,4 @@
+program: train_cov_dfp_3d.py
 method: random
 metric:
   name: val/dice
