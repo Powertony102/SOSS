@@ -12,198 +12,205 @@ from sklearn.model_selection import train_test_split
 import random
 from tqdm import tqdm
 import argparse
+from scipy import ndimage
+from skimage import transform
 
 
 def validate_nifti_data(img_data, label_data):
     """验证NIFTI数据的有效性"""
     if img_data is None or label_data is None:
-        return False, "数据为空"
-    
+        return False
     if img_data.shape != label_data.shape:
-        return False, f"图像和标签形状不匹配: {img_data.shape} vs {label_data.shape}"
-    
-    # 检查是否为4D数据（时间序列）
-    if len(img_data.shape) == 4:
-        # 选择ED和ES帧（通常是第0帧和中间某帧）
-        if img_data.shape[-1] >= 2:
-            return True, "4D数据，将提取ED/ES帧"
-        else:
-            return False, "4D数据但时间点不足"
-    elif len(img_data.shape) == 3:
-        return True, "3D数据"
-    else:
-        return False, f"不支持的数据维度: {img_data.shape}"
+        print(f"警告: 图像和标签形状不匹配: {img_data.shape} vs {label_data.shape}")
+        return False
+    if np.isnan(img_data).any() or np.isinf(img_data).any():
+        print("警告: 图像包含NaN或Inf值")
+        return False
+    return True
 
 
 def extract_ed_es_frames(img_4d, label_4d):
-    """从4D数据中提取ED和ES帧"""
-    # ED帧通常是第0帧（舒张末期）
-    ed_img = img_4d[..., 0]
-    ed_label = label_4d[..., 0]
-    
-    # ES帧通常在中间位置（收缩末期）
-    # 简单策略：选择中间帧或根据心脏容积最小的帧
-    num_frames = img_4d.shape[-1]
-    es_frame_idx = num_frames // 2
-    
-    es_img = img_4d[..., es_frame_idx]
-    es_label = label_4d[..., es_frame_idx]
-    
-    return (ed_img, ed_label), (es_img, es_label)
+    """提取ED和ES帧"""
+    # 通常ED是第一帧，ES是中间帧（根据心室体积判断）
+    if img_4d.ndim == 4:
+        # 计算每一帧的标签体积来判断ED/ES
+        volumes = []
+        for t in range(img_4d.shape[3]):
+            label_frame = label_4d[:, :, :, t]
+            # 计算左心室(LV=3)的体积
+            lv_volume = np.sum(label_frame == 3)
+            volumes.append(lv_volume)
+        
+        # ED: 最大体积（舒张末期）
+        # ES: 最小体积（收缩末期）
+        ed_idx = np.argmax(volumes)
+        es_idx = np.argmin(volumes)
+        
+        return ed_idx, es_idx
+    return 0, 0
 
 
 def normalize_image(image):
-    """图像归一化"""
-    # 计算非零区域的统计量
-    nonzero_mask = image > 0
-    if np.sum(nonzero_mask) == 0:
-        return image.astype(np.float32)
-    
-    mean_val = np.mean(image[nonzero_mask])
-    std_val = np.std(image[nonzero_mask])
-    
-    if std_val > 0:
-        image = (image - mean_val) / std_val
-    else:
-        image = image - mean_val
-    
+    """图像强度归一化到[0,1]"""
+    # 去除背景（值为0的区域）计算统计量
+    foreground_mask = image > 0
+    if np.sum(foreground_mask) > 0:
+        mean_val = np.mean(image[foreground_mask])
+        std_val = np.std(image[foreground_mask])
+        if std_val > 0:
+            # Z-score归一化
+            image = (image - mean_val) / std_val
+            # 截断到[-3, 3]范围
+            image = np.clip(image, -3, 3)
+            # 归一化到[0, 1]
+            image = (image + 3) / 6
+        else:
+            image = image / (np.max(image) + 1e-8)
     return image.astype(np.float32)
 
 
-def extract_2d_slices(img_3d, label_3d, min_label_pixels=50):
-    """从3D数据中提取2D切片，只保留有标签的切片"""
-    slices_data = []
+def resize_image_and_label(image, label, target_size=(256, 256)):
+    """将图像和标签resize到目标尺寸
     
-    # 遍历所有切片（通常在第2维，即axial方向）
-    for slice_idx in range(img_3d.shape[2]):
-        img_slice = img_3d[:, :, slice_idx]
-        label_slice = label_3d[:, :, slice_idx]
+    Args:
+        image: 输入图像 [H, W] 
+        label: 输入标签 [H, W]
+        target_size: 目标尺寸 (H, W)
+    
+    Returns:
+        resized_image, resized_label
+    """
+    # 图像使用双线性插值
+    resized_image = transform.resize(
+        image, 
+        target_size, 
+        order=1,  # 双线性插值
+        preserve_range=True,
+        anti_aliasing=True,
+        mode='constant'
+    ).astype(np.float32)
+    
+    # 标签使用最近邻插值
+    resized_label = transform.resize(
+        label, 
+        target_size, 
+        order=0,  # 最近邻插值
+        preserve_range=True,
+        anti_aliasing=False,
+        mode='constant'
+    ).astype(np.uint8)
+    
+    return resized_image, resized_label
+
+
+def extract_2d_slices(img_3d, label_3d, min_label_pixels=50, target_size=(256, 256)):
+    """从3D图像中提取有效的2D切片并resize到目标尺寸"""
+    slices = []
+    
+    for z in range(img_3d.shape[2]):
+        img_slice = img_3d[:, :, z]
+        label_slice = label_3d[:, :, z]
         
-        # 检查这个切片是否包含足够的标签
-        label_pixels = np.sum(label_slice > 0)
-        if label_pixels >= min_label_pixels:
-            # 确保图像是单通道
-            if len(img_slice.shape) == 2:
-                img_slice = img_slice[np.newaxis, ...]  # 添加通道维度 [1, H, W]
-            
+        # 检查是否包含足够的标签像素
+        if np.sum(label_slice > 0) >= min_label_pixels:
             # 归一化图像
             img_slice = normalize_image(img_slice)
             
-            # 确保标签是正确的类型
-            label_slice = label_slice.astype(np.uint8)
+            # Resize到目标尺寸
+            img_slice_resized, label_slice_resized = resize_image_and_label(
+                img_slice, label_slice, target_size
+            )
             
-            slices_data.append({
-                'image': img_slice,  # [1, H, W]
-                'label': label_slice,  # [H, W]
-                'slice_idx': slice_idx
+            # 添加通道维度 [H, W] -> [1, H, W]
+            img_slice_resized = img_slice_resized[None, ...]
+            
+            slices.append({
+                'image': img_slice_resized,
+                'label': label_slice_resized,
+                'slice_idx': z
             })
     
-    return slices_data
+    return slices
 
 
-def process_patient_data(patient_dir, patient_id):
+def process_patient_data(patient_dir, patient_id, target_size=(256, 256)):
     """处理单个患者的数据"""
-    print(f"处理患者: {patient_id}")
+    slices = []
     
-    # 查找图像和标签文件
-    img_files = []
-    label_files = []
+    # 查找ED和ES帧文件
+    frame_files = []
+    for filename in os.listdir(patient_dir):
+        if filename.endswith('.nii.gz') and 'frame' in filename and '_gt' not in filename:
+            frame_files.append(filename)
     
-    for file in os.listdir(patient_dir):
-        if file.endswith('.nii.gz'):
-            if 'gt' in file.lower():
-                label_files.append(file)
-            else:
-                img_files.append(file)
+    frame_files.sort()
     
-    if not img_files or not label_files:
-        print(f"警告: 患者 {patient_id} 缺少必要文件")
-        print(f"  图像文件: {img_files}")
-        print(f"  标签文件: {label_files}")
-        return []
-    
-    patient_slices = []
-    
-    # ACDC数据集的特殊处理
-    # 根据ACDC数据集结构，每个患者通常有：
-    # - patient001_4d.nii.gz (4D时间序列)
-    # - patient001_frame01.nii.gz (ED帧)
-    # - patient001_frame01_gt.nii.gz (ED帧标签)
-    # - patient001_frame??.nii.gz (ES帧)
-    # - patient001_frame??_gt.nii.gz (ES帧标签)
-    
-    # 优先处理frame文件（ED/ES帧）
-    frame_files = [f for f in img_files if 'frame' in f]
-    
-    if frame_files:
-        # 处理frame文件
-        for img_file in frame_files:
-            # 构造对应的标签文件名
-            base_name = img_file.replace('.nii.gz', '')
-            corresponding_label = f"{base_name}_gt.nii.gz"
+    for frame_file in frame_files:
+        frame_path = os.path.join(patient_dir, frame_file)
+        
+        # 构造对应的标签文件路径
+        label_file = frame_file.replace('.nii.gz', '_gt.nii.gz')
+        label_path = os.path.join(patient_dir, label_file)
+        
+        if not os.path.exists(label_path):
+            print(f"警告: 找不到标签文件 {label_path}")
+            continue
+        
+        try:
+            # 加载NIFTI文件
+            img_nii = nib.load(frame_path)
+            label_nii = nib.load(label_path)
             
-            if corresponding_label in label_files:
-                # 找到对应的标签文件
-                try:
-                    img_path = os.path.join(patient_dir, img_file)
-                    label_path = os.path.join(patient_dir, corresponding_label)
-                    
-                    img_nii = nib.load(img_path)
-                    label_nii = nib.load(label_path)
-                    
-                    img_data = img_nii.get_fdata()
-                    label_data = label_nii.get_fdata()
-                    
-                    # 验证数据
-                    is_valid, message = validate_nifti_data(img_data, label_data)
-                    if not is_valid:
-                        print(f"跳过 {img_file}: {message}")
-                        continue
-                    
-                    # 确定帧类型
-                    frame_type = 'ES' if 'frame01' not in img_file else 'ED'
-                    
-                    # 处理3D数据
-                    if len(img_data.shape) == 3:
-                        slices = extract_2d_slices(img_data, label_data)
-                        for slice_data in slices:
-                            slice_data['patient_id'] = patient_id
-                            slice_data['frame_type'] = frame_type
-                            slice_data['source_file'] = img_file
-                        patient_slices.extend(slices)
-                    
-                except Exception as e:
-                    print(f"处理 {img_file} 时出错: {e}")
-                    continue
-            else:
-                print(f"警告: 找不到 {img_file} 对应的标签文件 {corresponding_label}")
-    
-    # 如果没有frame文件，处理4D文件
-    elif any('4d' in f for f in img_files):
-        for img_file in img_files:
-            if '4d' in img_file:
-                # 4D文件通常没有直接对应的标签，跳过或特殊处理
-                print(f"跳过4D文件 {img_file}（通常用于生成frame文件）")
+            img_data = img_nii.get_fdata()
+            label_data = label_nii.get_fdata().astype(np.uint8)
+            
+            # 验证数据
+            if not validate_nifti_data(img_data, label_data):
                 continue
+            
+            # 确定帧类型
+            if 'frame01' in frame_file:
+                frame_type = 'ED'
+            elif 'frame' in frame_file:
+                frame_type = 'ES'
+            else:
+                frame_type = 'UNK'
+            
+            # 提取2D切片
+            patient_slices = extract_2d_slices(img_data, label_data, target_size=target_size)
+            
+            # 添加元数据
+            for slice_data in patient_slices:
+                slice_data.update({
+                    'patient_id': patient_id,
+                    'frame_type': frame_type,
+                    'source_file': frame_file
+                })
+                slices.append(slice_data)
+            
+            print(f"  {frame_file}: 提取了 {len(patient_slices)} 个切片")
+            
+        except Exception as e:
+            print(f"处理 {frame_file} 时出错: {e}")
+            continue
     
-    print(f"患者 {patient_id} 提取了 {len(patient_slices)} 个有效切片")
-    return patient_slices
+    return slices
 
 
-def save_h5_dataset(slices_data, output_path, dataset_name):
+def save_h5_dataset(slices_data, output_path, dataset_name, target_size=(256, 256)):
     """保存切片数据到H5文件"""
+    if not slices_data:
+        print(f"警告: {dataset_name} 数据集为空，跳过保存")
+        return
+    
     print(f"保存 {dataset_name} 数据到 {output_path}")
     
+    num_slices = len(slices_data)
+    
     with h5py.File(output_path, 'w') as f:
-        # 创建数据集
-        num_slices = len(slices_data)
-        
-        # 获取第一个样本的形状来初始化数据集
-        sample_img = slices_data[0]['image']
-        sample_label = slices_data[0]['label']
-        
-        img_shape = (num_slices,) + sample_img.shape  # [N, 1, H, W]
-        label_shape = (num_slices,) + sample_label.shape  # [N, H, W]
+        # 使用固定的图像形状
+        img_shape = (num_slices, 1, target_size[0], target_size[1])  # [N, 1, H, W]
+        label_shape = (num_slices, target_size[0], target_size[1])     # [N, H, W]
         
         # 创建数据集
         img_dataset = f.create_dataset('image', img_shape, dtype=np.float32)
@@ -217,8 +224,26 @@ def save_h5_dataset(slices_data, output_path, dataset_name):
         
         # 填充数据
         for i, slice_data in enumerate(tqdm(slices_data, desc="保存数据")):
-            img_dataset[i] = slice_data['image']
-            label_dataset[i] = slice_data['label']
+            # 确保图像形状正确
+            img = slice_data['image']
+            if img.shape != (1, target_size[0], target_size[1]):
+                print(f"警告: 切片 {i} 图像形状不匹配: {img.shape}, 期望: {(1, target_size[0], target_size[1])}")
+                # 尝试修复形状
+                if img.ndim == 2:
+                    img = img[None, ...]  # 添加通道维度
+                if img.shape[1:] != target_size:
+                    img_2d = img[0] if img.ndim == 3 else img
+                    img_2d, _ = resize_image_and_label(img_2d, slice_data['label'], target_size)
+                    img = img_2d[None, ...]
+            
+            # 确保标签形状正确
+            label = slice_data['label']
+            if label.shape != target_size:
+                print(f"警告: 切片 {i} 标签形状不匹配: {label.shape}, 期望: {target_size}")
+                _, label = resize_image_and_label(slice_data['image'][0] if slice_data['image'].ndim == 3 else slice_data['image'], label, target_size)
+            
+            img_dataset[i] = img
+            label_dataset[i] = label
             
             patient_ids.append(slice_data['patient_id'].encode('utf-8'))
             frame_types.append(slice_data['frame_type'].encode('utf-8'))
@@ -233,15 +258,16 @@ def save_h5_dataset(slices_data, output_path, dataset_name):
         
         # 保存数据集统计信息
         f.attrs['num_slices'] = num_slices
-        f.attrs['image_shape'] = sample_img.shape
-        f.attrs['label_shape'] = sample_label.shape
+        f.attrs['image_shape'] = (1, target_size[0], target_size[1])
+        f.attrs['label_shape'] = target_size
         f.attrs['num_classes'] = 4  # ACDC: 背景, LV, RV, MYO
         f.attrs['class_names'] = [b'background', b'LV', b'RV', b'MYO']
+        f.attrs['target_size'] = target_size
         
         print(f"数据集统计:")
         print(f"  切片数量: {num_slices}")
-        print(f"  图像形状: {sample_img.shape}")
-        print(f"  标签形状: {sample_label.shape}")
+        print(f"  图像形状: {(1, target_size[0], target_size[1])}")
+        print(f"  标签形状: {target_size}")
         print(f"  类别数量: 4")
 
 
@@ -337,12 +363,17 @@ def main():
                        help='切片中最少标签像素数量')
     parser.add_argument('--seed', type=int, default=42,
                        help='随机种子')
+    parser.add_argument('--target_size', type=int, nargs=2, default=[256, 256],
+                       help='目标图像尺寸 [height, width]')
     
     args = parser.parse_args()
     
     # 设置随机种子
     random.seed(args.seed)
     np.random.seed(args.seed)
+    
+    target_size = tuple(args.target_size)
+    print(f"目标图像尺寸: {target_size}")
     
     # 创建输出目录
     os.makedirs(args.output_dir, exist_ok=True)
@@ -367,7 +398,8 @@ def main():
     patient_slice_counts = {}
     
     for patient_id, patient_path in tqdm(patient_dirs, desc="处理患者数据"):
-        patient_slices = process_patient_data(patient_path, patient_id)
+        print(f"处理患者: {patient_id}")
+        patient_slices = process_patient_data(patient_path, patient_id, target_size)
         all_slices.extend(patient_slices)
         patient_slice_counts[patient_id] = len(patient_slices)
     
@@ -384,71 +416,28 @@ def main():
     # 保存训练集（包含标注和未标注数据）
     if train_slices:
         train_h5_path = os.path.join(args.output_dir, 'train.h5')
-        save_h5_dataset(train_slices, train_h5_path, 'train')
+        save_h5_dataset(train_slices, train_h5_path, 'train', target_size)
     
     # 保存验证集
     if val_slices:
         val_h5_path = os.path.join(args.output_dir, 'val.h5')
-        save_h5_dataset(val_slices, val_h5_path, 'val')
+        save_h5_dataset(val_slices, val_h5_path, 'val', target_size)
     
     # 保存纯标注数据（用于监督损失）
     if labeled_slices:
         labeled_h5_path = os.path.join(args.output_dir, 'labeled.h5')
-        save_h5_dataset(labeled_slices, labeled_h5_path, 'labeled')
+        save_h5_dataset(labeled_slices, labeled_h5_path, 'labeled', target_size)
     
     # 创建患者列表文件
     create_patient_list_file(args.output_dir, labeled_patients + unlabeled_patients, val_patients)
     
-    # 创建半监督学习的划分文件
-    labeled_list_path = os.path.join(args.output_dir, 'labeled_patients.txt')
-    unlabeled_list_path = os.path.join(args.output_dir, 'unlabeled_patients.txt')
-    
-    with open(labeled_list_path, 'w') as f:
-        for patient in labeled_patients:
-            f.write(f"{patient}\n")
-    
-    with open(unlabeled_list_path, 'w') as f:
-        for patient in unlabeled_patients:
-            f.write(f"{patient}\n")
-    
-    # 保存切片级别的索引文件
-    slice_indices_path = os.path.join(args.output_dir, 'slice_indices.txt')
-    with open(slice_indices_path, 'w') as f:
-        f.write(f"labeled_slices_count: {len(labeled_slices)}\n")
-        f.write(f"unlabeled_slices_start: {len(labeled_slices)}\n")
-        f.write(f"unlabeled_slices_count: {len(unlabeled_slices)}\n")
-        f.write(f"total_train_slices: {len(train_slices)}\n")
-    
-    # 保存处理参数
-    params_path = os.path.join(args.output_dir, 'preprocessing_params.txt')
-    with open(params_path, 'w') as f:
-        f.write(f"Input directory: {args.input_dir}\n")
-        f.write(f"Output directory: {args.output_dir}\n")
-        f.write(f"Labeled ratio: {args.labeled_ratio}\n")
-        f.write(f"Val ratio: {args.val_ratio}\n")
-        f.write(f"Min label pixels: {args.min_label_pixels}\n")
-        f.write(f"Random seed: {args.seed}\n")
-        f.write(f"Total patients: {len(patient_dirs)}\n")
-        f.write(f"Total slices: {len(all_slices)}\n")
-        f.write(f"Labeled patients: {len(labeled_patients)}\n")
-        f.write(f"Unlabeled patients: {len(unlabeled_patients)}\n")
-        f.write(f"Val patients: {len(val_patients)}\n")
-        f.write(f"Labeled slices: {len(labeled_slices)}\n")
-        f.write(f"Unlabeled slices: {len(unlabeled_slices)}\n")
-        f.write(f"Train slices: {len(train_slices)}\n")
-        f.write(f"Val slices: {len(val_slices)}\n")
-    
-    print(f"\n预处理完成！参数已保存到 {params_path}")
-    print(f"数据已保存到 {args.output_dir}")
-    print(f"\n文件结构:")
-    print(f"├── train.h5                    # 训练集（标注+未标注）")
-    print(f"├── labeled.h5                  # 纯标注数据")
-    print(f"├── val.h5                      # 验证集")
-    print(f"├── labeled_patients.txt        # 标注患者列表")
-    print(f"├── unlabeled_patients.txt      # 未标注患者列表")
-    print(f"├── slice_indices.txt           # 切片索引信息")
-    print(f"└── preprocessing_params.txt    # 预处理参数")
+    print(f"\n预处理完成!")
+    print(f"输出目录: {args.output_dir}")
+    print(f"训练集: {len(train_slices)} 切片")
+    print(f"验证集: {len(val_slices)} 切片") 
+    print(f"标注数据: {len(labeled_slices)} 切片")
+    print(f"图像尺寸: {target_size}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main() 
