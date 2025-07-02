@@ -44,8 +44,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_name', type=str, default='ACDC', help='dataset_name')
 parser.add_argument('--root_path', type=str, default='./', help='Root path of the project')
 parser.add_argument('--dataset_path', type=str, default='/home/jovyan/work/medical_dataset/ACDC', help='Path to the ACDC dataset')
-parser.add_argument('--exp', type=str, default='acdc_cov_dfp', help='exp_name')
-parser.add_argument('--model', type=str, default='unet', help='model_name: unet, vnet, corn')
+parser.add_argument('--exp', type=str, default='acdc_soss', help='exp_name')
+parser.add_argument('--model', type=str, default='soss', help='model_name: unet, vnet, corn')
 parser.add_argument('--max_iteration', type=int, default=20000, help='maximum iteration to train')
 parser.add_argument('--max_samples', type=int, default=200, help='maximum samples to train')
 parser.add_argument('--labeled_bs', type=int, default=2, help='batch_size of labeled data per gpu')
@@ -53,7 +53,7 @@ parser.add_argument('--batch_size', type=int, default=4, help='total batch size'
 parser.add_argument('--base_lr', type=float, default=0.01, help='base learning rate')
 parser.add_argument('--labelnum', type=int, default=7, help='number of labeled samples')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
-parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
+parser.add_argument('--gpu', type=str, default='1', help='GPU to use')
 
 # ACDC特定参数
 parser.add_argument('--patch_size', type=tuple, default=(256, 256), help='patch size for 2D ACDC')
@@ -87,7 +87,7 @@ parser.add_argument('--separation_margin', type=float, default=1.0, help='margin
 
 # 其他参数
 parser.add_argument('--use_wandb', action='store_true', help='use wandb for logging')
-parser.add_argument('--wandb_project', type=str, default='ACDC-Cov-DFP', help='wandb project name')
+parser.add_argument('--wandb_project', type=str, default='SOSS-ACDC', help='wandb project name')
 parser.add_argument('--wandb_entity', type=str, default=None, help='wandb entity name')
 parser.add_argument('--consistency_o', type=float, default=0.05, help='lambda_s to balance sim loss')
 parser.add_argument('--hcc_patch_strategy', type=str, default='mean_cov', 
