@@ -8,7 +8,7 @@ DATASET_NAME="LA"
 DATASET_PATH="/home/jovyan/work/medical_dataset/LA"  # 根据实际路径修改
 EXP_NAME="cov_dfp_metric_learning"
 MODEL="corn"
-GPU="0"
+GPU="1"
 
 # 训练参数
 MAX_ITERATION=15000
@@ -25,12 +25,12 @@ CONSISTENCY_RAMPUP=40.0
 LAMBDA_HCC=0.1
 
 # DFP参数
-NUM_DFP=8
+NUM_DFP=6
 DFP_START_ITER=2000
-SELECTOR_TRAIN_ITER=50
-DFP_RECONSTRUCT_INTERVAL=1000
+SELECTOR_TRAIN_ITER=150
+DFP_RECONSTRUCT_INTERVAL=3000
 MAX_GLOBAL_FEATURES=50000
-EMBEDDING_DIM=64
+EMBEDDING_DIM=128
 
 # 度量学习参数（新增）
 LAMBDA_COMPACT=0.1      # 池内紧凑性损失权重
@@ -47,7 +47,7 @@ HCC_SCALE=1.0
 
 # Wandb配置
 USE_WANDB=true
-WANDB_PROJECT="Cov-DFP-MetricLearning"
+WANDB_PROJECT="SOSS"
 WANDB_ENTITY=""  # 根据需要设置
 
 echo "=== 开始训练集成结构对齐与度量学习的动态特征池（Cov-DFP）框架 ==="
