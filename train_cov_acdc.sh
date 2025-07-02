@@ -3,4 +3,4 @@ python train_acdc_cov_dfp.py \
     --labelnum 7 \
     --use_dfp \
     --gpu 1 \
-    --model corn \
+    --model corn2d \

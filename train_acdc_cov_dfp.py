@@ -154,6 +154,22 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
     volume_batch, label_batch, idx = sampled_batch['image'], sampled_batch['label'], sampled_batch['idx']
     volume_batch, label_batch, idx = volume_batch.cuda(), label_batch.cuda(), idx.cuda()
 
+    # 数据形状检查和修复
+    print(f"DEBUG: 原始数据形状 - volume_batch: {volume_batch.shape}, label_batch: {label_batch.shape}")
+    
+    # 确保输入是正确的格式：[B, 1, H, W]
+    if len(volume_batch.shape) == 4:
+        if volume_batch.shape[1] == 4:  # 如果有4个通道，只取第一个通道
+            print(f"WARNING: 检测到4通道输入，只使用第一个通道")
+            volume_batch = volume_batch[:, 0:1, :, :]  # 只取第一个通道
+        elif volume_batch.shape[1] != 1:
+            print(f"WARNING: 通道数异常 {volume_batch.shape[1]}，重新调整为1通道")
+            volume_batch = volume_batch[:, 0:1, :, :]
+    elif len(volume_batch.shape) == 3:  # [B, H, W] -> [B, 1, H, W]
+        volume_batch = volume_batch.unsqueeze(1)
+    
+    print(f"DEBUG: 修正后数据形状 - volume_batch: {volume_batch.shape}, label_batch: {label_batch.shape}")
+    
     # 直接使用2D数据进行前向传播
     model_output = model(volume_batch, with_hcc=True)
     if isinstance(model_output, dict):
@@ -267,10 +283,22 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
 
 def train_stage_two(model, sampled_batch, optimizer, selector_optimizer, consistency_criterion, 
                    dice_loss, cov_dfp, iter_num, writer=None):
-    """阶段二：动态特征池构建和选择器训练"""
+    """阶段二：DFP构建与度量学习训练
+    
+    目标：构建动态特征池，训练选择器网络，执行度量学习
+    """
     model.train()
     volume_batch, label_batch, idx = sampled_batch['image'], sampled_batch['label'], sampled_batch['idx']
     volume_batch, label_batch, idx = volume_batch.cuda(), label_batch.cuda(), idx.cuda()
+
+    # 数据形状检查和修复（与stage_one相同）
+    if len(volume_batch.shape) == 4:
+        if volume_batch.shape[1] == 4:  # 如果有4个通道，只取第一个通道
+            volume_batch = volume_batch[:, 0:1, :, :]  # 只取第一个通道
+        elif volume_batch.shape[1] != 1:
+            volume_batch = volume_batch[:, 0:1, :, :]
+    elif len(volume_batch.shape) == 3:  # [B, H, W] -> [B, 1, H, W]
+        volume_batch = volume_batch.unsqueeze(1)
 
     # 前向传播 - 直接使用2D数据
     model_output = model(volume_batch, with_hcc=True)
@@ -416,10 +444,12 @@ if __name__ == "__main__":
                   name=f"{args.exp}_{args.labelnum}_{args.model}", config=args)
 
     # 创建模型
+    print(f"创建模型: {args.model}")
     model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
+    print(f"模型创建成功: {type(model).__name__}")
     
-    # 添加投影头（如果使用DFP）
-    if args.use_dfp:
+    # 只有当模型没有内置投影头时才添加（corn2d已经有内置投影头）
+    if args.use_dfp and not hasattr(model, 'projection_head1'):
         # 获取模型的特征维度
         if args.model == 'unet':
             feature_dim = 64  # UNet的特征维度
@@ -427,6 +457,8 @@ if __name__ == "__main__":
             feature_dim = 64
         elif args.model == 'corn':
             feature_dim = 64
+        elif args.model == 'corn2d':
+            feature_dim = 16  # corn2d模型的特征维度（n_filters）
         else:
             feature_dim = 64
             
@@ -441,6 +473,10 @@ if __name__ == "__main__":
             torch.nn.ReLU(),
             torch.nn.Linear(args.embedding_dim, args.embedding_dim)
         ).cuda()
+        
+        print(f"添加了外部投影头，特征维度: {feature_dim}")
+    else:
+        print(f"使用模型内置的投影头")
 
     # 初始化DFP
     cov_dfp = None
@@ -477,9 +513,12 @@ if __name__ == "__main__":
     
     # Selector单独的优化器
     selector_optimizer = None
-    if args.use_dfp:
+    if args.use_dfp and hasattr(model, 'dfp_selector') and model.dfp_selector is not None:
         selector_params = list(model.dfp_selector.parameters())
         selector_optimizer = optim.Adam(selector_params, lr=0.001, weight_decay=0.0001)
+        print(f"创建了Selector优化器，参数数量: {len(selector_params)}")
+    else:
+        print("未创建Selector优化器（模型无dfp_selector或未启用DFP）")
 
     # 初始化tensorboard writer
     writer = SummaryWriter(snapshot_path + '/log') if not args.use_wandb else None
