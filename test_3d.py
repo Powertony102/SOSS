@@ -26,23 +26,30 @@ parser.add_argument('--embedding_dim', type=int, default=64, help='dim of embedd
 parser.add_argument('--num_filtered', type=int, default=12800,
                     help='num of unlabeled embeddings to calculate similarity')
 
+# 新增参数以匹配训练脚本
+parser.add_argument('--num_dfp', type=int, default=6, help='number of dynamic feature pools')
+parser.add_argument('--lambda_compact', type=float, default=0.1, help='weight for intra-pool compactness loss')
+parser.add_argument('--lambda_separate', type=float, default=0.05, help='weight for inter-pool separation loss')
+
 FLAGS = parser.parse_args()
 os.environ['CUDA_VISIBLE_DEVICES'] = FLAGS.gpu
 
-
-
-snapshot_path = "./model/LA_{}_{}_memory{}_feat{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}/{}".format(
+# 修改snapshot_path构建方式，与训练脚本保持一致
+snapshot_path = "./model/LA_{}_{}_dfp{}_memory{}_feat{}_compact{}_separate{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}".format(
     FLAGS.exp,
     FLAGS.labelnum,
+    FLAGS.num_dfp,
     FLAGS.memory_num,
     FLAGS.embedding_dim,
+    FLAGS.lambda_compact,
+    FLAGS.lambda_separate,
     FLAGS.num_filtered,
     FLAGS.consistency,
     FLAGS.consistency_rampup,
     FLAGS.consistency_o,
     FLAGS.max_iteration,
-    FLAGS.seed,
-    FLAGS.model)
+    FLAGS.seed)
+
 test_save_path = FLAGS.root_path + "model/{}_{}_{}_labeled/{}_predictions/".format(FLAGS.dataset_name, FLAGS.exp,
                                                                                    FLAGS.labelnum, FLAGS.model)
 
@@ -56,7 +63,8 @@ if FLAGS.dataset_name == "LA":
 
 if not os.path.exists(test_save_path):
     os.makedirs(test_save_path)
-print(test_save_path)
+print("Model path:", snapshot_path)
+print("Test save path:", test_save_path)
 
 
 def test_calculate_metric():
