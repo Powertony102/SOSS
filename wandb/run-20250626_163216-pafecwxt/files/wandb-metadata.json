@@ -1,0 +1,23 @@
+{
+  "os": "Linux-5.15.0-56-generic-x86_64-with-glibc2.35",
+  "python": "CPython 3.10.18",
+  "startedAt": "2025-06-26T16:32:16.676463Z",
+  "args": [
+    "--use_wandb",
+    "--wandb_project",
+    "my-corn-project",
+    "--gpu",
+    "1"
+  ],
+  "program": "/home/jovyan/work/SOSS/train_corn_3d.py",
+  "codePath": "train_corn_3d.py",
+  "git": {
+    "remote": "https://github.com/Powertony102/SOSS.git",
+    "commit": "64b9ff43d8f0256ffd2cc41e057a9c003552e7a8"
+  },
+  "email": "powertony102@gmail.com",
+  "root": "/home/jovyan/work/SOSS",
+  "host": "eb23a81b83e9",
+  "executable": "/opt/conda/envs/SOSS/bin/python",
+  "codePathLocal": "train_corn_3d.py"
+}
