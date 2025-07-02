@@ -86,6 +86,14 @@ class CovarianceDynamicFeaturePool:
     
     def _trim_global_pool(self):
         """裁剪全局特征池到最大容量"""
+        # 确保特征和标签的数量一致
+        if len(self.global_features) != len(self.global_labels):
+            logging.error(f"Features and labels count mismatch: {len(self.global_features)} vs {len(self.global_labels)}")
+            # 修复不一致的情况
+            min_len = min(len(self.global_features), len(self.global_labels))
+            self.global_features = self.global_features[:min_len]
+            self.global_labels = self.global_labels[:min_len]
+        
         total_size = 0
         for i in range(len(self.global_features) - 1, -1, -1):
             total_size += self.global_features[i].shape[0]
@@ -93,8 +101,12 @@ class CovarianceDynamicFeaturePool:
                 # 裁剪当前特征矩阵
                 excess = total_size - self.max_global_features
                 self.global_features[i] = self.global_features[i][excess:]
-                # 移除更早的特征
+                # 同时裁剪对应的标签
+                self.global_labels[i] = self.global_labels[i][excess:]
+                
+                # 移除更早的特征和标签
                 self.global_features = self.global_features[i:]
+                self.global_labels = self.global_labels[i:]
                 break
     
     def build_dfps(self, max_optimization_iterations: int = 50, learning_rate: float = 0.01) -> bool:
@@ -377,12 +389,24 @@ class CovarianceDynamicFeaturePool:
             logging.warning("No labels available for Two-Phase k-means, falling back to standard method")
             return self._optimize_dfps_with_metric_learning(F_global, max_iterations, learning_rate)
         
+        # 调试信息：检查特征和标签列表的状态
+        logging.info(f"Building Two-Phase k-means: {len(self.global_features)} feature batches, "
+                    f"{len(self.global_labels)} label batches")
+        
+        # 打印每个batch的大小
+        feature_sizes = [feat.shape[0] for feat in self.global_features]
+        label_sizes = [lbl.shape[0] for lbl in self.global_labels]
+        logging.info(f"Feature batch sizes: {feature_sizes}")
+        logging.info(f"Label batch sizes: {label_sizes}")
+        
         # 合并所有标签
         all_labels = torch.cat(self.global_labels, dim=0)  # [N]
         N, D = F_global.shape
         
         if all_labels.shape[0] != N:
             logging.error(f"Feature-label size mismatch: {N} vs {all_labels.shape[0]}")
+            logging.error(f"Total feature batches: {len(self.global_features)}, total label batches: {len(self.global_labels)}")
+            logging.error(f"Sum of feature sizes: {sum(feature_sizes)}, sum of label sizes: {sum(label_sizes)}")
             return False
         
         logging.info(f"Starting Two-Phase k-means with {self.num_classes} classes")
