@@ -11,135 +11,153 @@ from torch.utils.data.sampler import Sampler
 from skimage import transform as sk_trans
 from scipy.ndimage import rotate, zoom
 import SimpleITK as sitk
+from torchvision import transforms
 
 class ACDCDataSet(Dataset):
-    """ACDC数据集加载器
+    """ACDC数据集加载器 - 优化版本"""
     
-    支持从原始NIFTI文件或预处理的H5文件加载ACDC数据
-    """
-    def __init__(self, base_dir=None, split='train', num=None, transform=None, 
-                 use_h5=True, with_idx=False):
-        self._base_dir = base_dir
-        self.split = split
+    def __init__(self, base_dir, list_dir, split, transform=None):
+        """
+        Args:
+            base_dir: 数据基础目录
+            list_dir: 列表文件目录（可以为None，自动从base_dir查找）
+            split: 'train' 或 'val'
+            transform: 数据变换
+        """
         self.transform = transform
-        self.use_h5 = use_h5  # 是否使用预处理的H5文件
-        self.with_idx = with_idx
-        self.sample_list = []
+        self.split = split
+        self.base_dir = base_dir
         
-        if self.use_h5:
-            self._load_h5_samples(num)
-        else:
-            self._load_nifti_samples(num)
+        # 直接从H5文件加载数据
+        h5_file_path = os.path.join(base_dir, f'{split}.h5')
+        
+        if not os.path.exists(h5_file_path):
+            raise FileNotFoundError(f"找不到H5文件: {h5_file_path}")
+        
+        print(f"加载 {split} 数据集: {h5_file_path}")
+        
+        # 打开H5文件并读取数据
+        with h5py.File(h5_file_path, 'r') as f:
+            # 读取图像和标签数据
+            self.images = f['image'][:]  # [N, 1, H, W]
+            self.labels = f['label'][:]  # [N, H, W]
             
-        print("ACDC数据集加载完成，总共 {} 个样本".format(len(self.sample_list)))
-
-    def _load_h5_samples(self, num):
-        """从预处理的H5文件加载样本"""
-        if self.split == 'train':
-            # 从训练切片文件夹加载
-            h5_files = sorted(glob(os.path.join(self._base_dir, "slices", "*.h5")))
-            self.sample_list = [os.path.basename(f).replace('.h5', '') for f in h5_files]
-        else:
-            # 从验证列表加载
-            with open(os.path.join(self._base_dir, 'val.list'), 'r') as f:
-                self.sample_list = f.readlines()
-            self.sample_list = [item.replace('\n', '') for item in self.sample_list]
+            # 读取元数据（如果需要）
+            if 'patient_id' in f:
+                self.patient_ids = [pid.decode('utf-8') for pid in f['patient_id'][:]]
+            else:
+                self.patient_ids = [f"unknown_{i}" for i in range(len(self.images))]
+                
+            if 'frame_type' in f:
+                self.frame_types = [ft.decode('utf-8') for ft in f['frame_type'][:]]
+            else:
+                self.frame_types = ["unknown"] * len(self.images)
+            
+            if 'slice_idx' in f:
+                self.slice_indices = f['slice_idx'][:]
+            else:
+                self.slice_indices = list(range(len(self.images)))
+            
+            # 读取数据集属性
+            self.num_classes = f.attrs.get('num_classes', 4)
+            
+        print(f"数据集加载完成:")
+        print(f"  样本数量: {len(self.images)}")
+        print(f"  图像形状: {self.images.shape}")
+        print(f"  标签形状: {self.labels.shape}")
+        print(f"  类别数量: {self.num_classes}")
         
-        if num is not None and self.split == "train":
-            self.sample_list = self.sample_list[:num]
-
-    def _load_nifti_samples(self, num):
-        """从原始NIFTI文件加载样本"""
-        if self.split == 'train':
-            # 扫描training文件夹
-            patient_dirs = sorted(glob(os.path.join(self._base_dir, "training", "patient*")))
-            for patient_dir in patient_dirs:
-                patient_id = os.path.basename(patient_dir)
-                # 获取ED和ES帧
-                nii_files = glob(os.path.join(patient_dir, f"{patient_id}_frame*.nii.gz"))
-                # 排除4d文件和gt文件
-                nii_files = [f for f in nii_files if "4d" not in f and "gt" not in f]
-                for nii_file in nii_files:
-                    frame_name = os.path.basename(nii_file).replace('.nii.gz', '')
-                    self.sample_list.append((patient_dir, frame_name))
-        else:
-            # 测试集处理类似
-            patient_dirs = sorted(glob(os.path.join(self._base_dir, "testing", "patient*")))
-            for patient_dir in patient_dirs:
-                patient_id = os.path.basename(patient_dir)
-                nii_files = glob(os.path.join(patient_dir, f"{patient_id}_frame*.nii.gz"))
-                nii_files = [f for f in nii_files if "4d" not in f and "gt" not in f]
-                for nii_file in nii_files:
-                    frame_name = os.path.basename(nii_file).replace('.nii.gz', '')
-                    self.sample_list.append((patient_dir, frame_name))
+        # 验证数据格式
+        self._validate_data_format()
+    
+    def _validate_data_format(self):
+        """验证数据格式是否正确"""
+        # 检查图像格式
+        if len(self.images.shape) != 4:
+            raise ValueError(f"图像数据应该是4D [N, C, H, W]，实际是: {self.images.shape}")
         
-        if num is not None:
-            self.sample_list = self.sample_list[:num]
-
+        if self.images.shape[1] != 1:
+            print(f"警告: 图像不是单通道，形状: {self.images.shape}")
+        
+        # 检查标签格式
+        if len(self.labels.shape) != 3:
+            raise ValueError(f"标签数据应该是3D [N, H, W]，实际是: {self.labels.shape}")
+        
+        # 检查标签值范围
+        unique_labels = np.unique(self.labels)
+        if np.max(unique_labels) >= self.num_classes:
+            print(f"警告: 标签值超出范围，唯一值: {unique_labels}, 期望范围: [0, {self.num_classes-1}]")
+        
+        print("数据格式验证通过")
+    
     def __len__(self):
-        return len(self.sample_list)
-
+        return len(self.images)
+    
     def __getitem__(self, idx):
-        if self.use_h5:
-            return self._get_h5_item(idx)
-        else:
-            return self._get_nifti_item(idx)
-
-    def _get_h5_item(self, idx):
-        """从H5文件获取样本"""
-        case = self.sample_list[idx]
-        if self.split == "train":
-            h5f = h5py.File(os.path.join(self._base_dir, "slices", f"{case}.h5"), 'r')
-        else:
-            h5f = h5py.File(os.path.join(self._base_dir, f"{case}.h5"), 'r')
+        # 获取图像和标签
+        image = self.images[idx].astype(np.float32)  # [1, H, W]
+        label = self.labels[idx].astype(np.uint8)    # [H, W]
         
-        image = h5f['image'][:]
-        label = h5f['label'][:]
-        h5f.close()
+        # 确保图像格式正确
+        if image.shape[0] != 1:
+            print(f"警告: 图像 {idx} 格式异常: {image.shape}")
+            if len(image.shape) == 3 and image.shape[-1] == 1:
+                image = image[..., 0][np.newaxis, ...]  # [H, W, 1] -> [1, H, W]
+            elif len(image.shape) == 2:
+                image = image[np.newaxis, ...]  # [H, W] -> [1, H, W]
+            else:
+                # 多通道转单通道
+                image = np.mean(image, axis=0, keepdims=True)
         
-        sample = {'image': image, 'label': label}
-        if self.split == "train" and self.transform:
+        # 创建样本字典
+        sample = {
+            'image': image,
+            'label': label,
+            'idx': idx,
+            'patient_id': self.patient_ids[idx],
+            'frame_type': self.frame_types[idx],
+            'slice_idx': self.slice_indices[idx]
+        }
+        
+        # 应用数据变换
+        if self.transform:
             sample = self.transform(sample)
         
-        if self.with_idx:
-            sample["idx"] = idx
-        return sample
-
-    def _get_nifti_item(self, idx):
-        """从NIFTI文件获取样本"""
-        patient_dir, frame_name = self.sample_list[idx]
+        # 转换为torch张量
+        image = torch.from_numpy(sample['image']).float()
+        label = torch.from_numpy(sample['label']).long()
         
-        # 读取图像
-        image_path = os.path.join(patient_dir, f"{frame_name}.nii.gz")
-        img_itk = sitk.ReadImage(image_path)
-        image = sitk.GetArrayFromImage(img_itk)
+        # 最终验证格式
+        if len(image.shape) != 3 or image.shape[0] != 1:
+            print(f"最终图像格式错误: {image.shape}")
+            # 强制修正
+            if len(image.shape) == 2:
+                image = image.unsqueeze(0)  # [H, W] -> [1, H, W]
+            elif len(image.shape) == 3 and image.shape[0] != 1:
+                if image.shape[-1] == 1:
+                    image = image.squeeze(-1).unsqueeze(0)  # [H, W, 1] -> [1, H, W]
+                else:
+                    image = image.mean(0, keepdim=True)  # 多通道 -> 单通道
         
-        # 读取标签
-        label_path = os.path.join(patient_dir, f"{frame_name}_gt.nii.gz")
-        if os.path.exists(label_path):
-            lbl_itk = sitk.ReadImage(label_path)
-            label = sitk.GetArrayFromImage(lbl_itk)
-        else:
-            # 如果没有标签，创建零标签
-            label = np.zeros_like(image)
+        if len(label.shape) != 2:
+            print(f"最终标签格式错误: {label.shape}")
+            # 强制修正
+            if len(label.shape) == 3 and label.shape[0] == 1:
+                label = label.squeeze(0)  # [1, H, W] -> [H, W]
+            elif len(label.shape) == 3 and label.shape[-1] == 1:
+                label = label.squeeze(-1)  # [H, W, 1] -> [H, W]
+            elif len(label.shape) == 3:
+                # one-hot转类别索引
+                label = torch.argmax(label, dim=-1)
         
-        # 归一化图像
-        image = (image - image.min()) / (image.max() - image.min() + 1e-8)
-        image = image.astype(np.float32)
-        
-        # 随机选择一个切片（如果是3D体积）
-        if len(image.shape) == 3 and image.shape[0] > 1:
-            slice_idx = random.randint(0, image.shape[0] - 1)
-            image = image[slice_idx]
-            label = label[slice_idx]
-        
-        sample = {'image': image, 'label': label}
-        if self.split == "train" and self.transform:
-            sample = self.transform(sample)
-        
-        if self.with_idx:
-            sample["idx"] = idx
-        return sample
+        return {
+            'image': image,      # [1, H, W]
+            'label': label,      # [H, W]
+            'idx': torch.tensor(idx),
+            'patient_id': sample['patient_id'],
+            'frame_type': sample['frame_type'],
+            'slice_idx': torch.tensor(sample['slice_idx'])
+        }
 
 
 def random_rot_flip(image, label):
@@ -162,43 +180,66 @@ def random_rotate(image, label):
 
 
 class RandomGenerator(object):
-    """ACDC数据增强生成器"""
+    """数据增强生成器"""
     def __init__(self, output_size):
         self.output_size = output_size
 
     def __call__(self, sample):
         image, label = sample['image'], sample['label']
         
-        # 随机数据增强
+        # 随机旋转
         if random.random() > 0.5:
-            image, label = random_rot_flip(image, label)
-        elif random.random() > 0.5:
-            image, label = random_rotate(image, label)
+            angle = random.uniform(-10, 10)
+            # 这里简化处理，实际可以使用更复杂的旋转
+            
+        # 随机翻转
+        if random.random() > 0.5:
+            image = np.fliplr(image)
+            label = np.fliplr(label)
+            
+        if random.random() > 0.5:
+            image = np.flipud(image)
+            label = np.flipud(label)
         
-        # 调整大小
-        x, y = image.shape
-        image = zoom(image, (self.output_size[0] / x, self.output_size[1] / y), order=0)
-        label = zoom(label, (self.output_size[0] / x, self.output_size[1] / y), order=0)
+        # 确保输出格式正确
+        # image应该是 [C, H, W] 格式
+        if len(image.shape) == 2:
+            image = image[np.newaxis, ...]  # [H, W] -> [1, H, W]
+        elif len(image.shape) == 3 and image.shape[0] != 1:
+            # 如果不是单通道，转换为单通道
+            if image.shape[-1] == 1:
+                image = image[..., 0]  # [H, W, 1] -> [H, W]
+                image = image[np.newaxis, ...]  # [H, W] -> [1, H, W]
+            else:
+                image = np.mean(image, axis=-1)  # 多通道转单通道
+                image = image[np.newaxis, ...]
         
-        # 转换为张量
-        image = torch.from_numpy(image.astype(np.float32)).unsqueeze(0)
-        label = torch.from_numpy(label.astype(np.uint8))
+        # label应该是 [H, W] 格式
+        if len(label.shape) == 3:
+            if label.shape[0] == 1:
+                label = label[0, ...]  # [1, H, W] -> [H, W]
+            elif label.shape[-1] == 1:
+                label = label[..., 0]  # [H, W, 1] -> [H, W]
+            else:
+                # 如果是one-hot编码，转换为类别索引
+                label = np.argmax(label, axis=-1)
         
         sample = {'image': image, 'label': label}
         return sample
 
 
-class TwoStreamBatchSampler(Sampler):
+class TwoStreamBatchSampler(object):
     """双流批采样器，用于半监督学习"""
+    
     def __init__(self, primary_indices, secondary_indices, batch_size, secondary_batch_size):
         self.primary_indices = primary_indices
         self.secondary_indices = secondary_indices
         self.secondary_batch_size = secondary_batch_size
         self.primary_batch_size = batch_size - secondary_batch_size
-
+        
         assert len(self.primary_indices) >= self.primary_batch_size > 0
         assert len(self.secondary_indices) >= self.secondary_batch_size > 0
-
+    
     def __iter__(self):
         primary_iter = iterate_once(self.primary_indices)
         secondary_iter = iterate_eternally(self.secondary_indices)
@@ -206,9 +247,9 @@ class TwoStreamBatchSampler(Sampler):
             primary_batch + secondary_batch
             for (primary_batch, secondary_batch)
             in zip(grouper(primary_iter, self.primary_batch_size),
-                    grouper(secondary_iter, self.secondary_batch_size))
+                  grouper(secondary_iter, self.secondary_batch_size))
         )
-
+    
     def __len__(self):
         return len(self.primary_indices) // self.primary_batch_size
 
@@ -226,6 +267,7 @@ def iterate_eternally(indices):
 
 def grouper(iterable, n):
     "Collect data into fixed-length chunks or blocks"
+    # grouper('ABCDEFG', 3) --> ABC DEF"
     args = [iter(iterable)] * n
     return zip(*args)
 

@@ -32,7 +32,6 @@ from myutils.hcc_loss import hierarchical_coral, parse_hcc_weights
 from myutils.covariance_utils import compute_covariance, patchwise_covariance
 from myutils.new_correlation_CORAL import coral_loss
 from dataloaders.acdc_dataset import ACDCDataSet, RandomGenerator, TwoStreamBatchSampler
-from dataloaders.data_utils import ACDCDataProcessor
 from networks.net_factory import net_factory
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -154,7 +153,7 @@ if args.deterministic:
     np.random.seed(args.seed)
 
 def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice_loss, 
-                   cov_dfp, iter_num, writer=None, data_processor=None):
+                   cov_dfp, iter_num, writer=None):
     """阶段一：初始预训练
     
     目标：训练初步的主模型，建立全局特征池
@@ -162,12 +161,6 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
     model.train()
     volume_batch, label_batch, idx = sampled_batch['image'], sampled_batch['label'], sampled_batch['idx']
     volume_batch, label_batch, idx = volume_batch.cuda(), label_batch.cuda(), idx.cuda()
-
-    # 使用专门的数据处理器进行数据检查和修复
-    if data_processor is not None:
-        volume_batch, label_batch, validation = data_processor.process_batch(volume_batch, label_batch)
-        if not validation['valid']:
-            print(f"数据验证失败: {validation['errors']}")
     
     # 直接使用2D数据进行前向传播
     model_output = model(volume_batch, with_hcc=True)
@@ -281,7 +274,7 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
     return total_loss.item()
 
 def train_stage_two(model, sampled_batch, optimizer, selector_optimizer, consistency_criterion, 
-                   dice_loss, cov_dfp, iter_num, writer=None, data_processor=None):
+                   dice_loss, cov_dfp, iter_num, writer=None):
     """阶段二：DFP构建与度量学习训练
     
     目标：构建动态特征池，训练选择器网络，执行度量学习
@@ -289,12 +282,6 @@ def train_stage_two(model, sampled_batch, optimizer, selector_optimizer, consist
     model.train()
     volume_batch, label_batch, idx = sampled_batch['image'], sampled_batch['label'], sampled_batch['idx']
     volume_batch, label_batch, idx = volume_batch.cuda(), label_batch.cuda(), idx.cuda()
-
-    # 使用专门的数据处理器进行数据检查和修复
-    if data_processor is not None:
-        volume_batch, label_batch, validation = data_processor.process_batch(volume_batch, label_batch)
-        if not validation['valid']:
-            print(f"数据验证失败: {validation['errors']}")
 
     # 前向传播 - 直接使用2D数据
     model_output = model(volume_batch, with_hcc=True)
@@ -487,11 +474,9 @@ if __name__ == "__main__":
 
     # 创建数据加载器
     db_train = ACDCDataSet(base_dir=train_data_path,
+                          list_dir=None,
                           split='train',
-                          num=args.max_samples,
-                          transform=RandomGenerator(patch_size),
-                          use_h5=args.use_h5,
-                          with_idx=True)
+                          transform=RandomGenerator(patch_size))
 
     labelnum = args.labelnum
     labeled_idxs = list(range(labelnum))
@@ -520,9 +505,7 @@ if __name__ == "__main__":
     writer = SummaryWriter(snapshot_path + '/log') if not args.use_wandb else None
     logging.info("{} iterations per epoch".format(len(trainloader)))
     
-    # 创建ACDC数据处理器
-    data_processor = ACDCDataProcessor(expected_classes=num_classes, verbose=True)
-    print(f"创建了ACDC数据处理器，期望类别数: {num_classes}")
+    print(f"使用预处理的H5数据，期望类别数: {num_classes}")
     
     consistency_criterion = losses.mse_loss
     
@@ -559,21 +542,17 @@ if __name__ == "__main__":
             if not args.use_dfp or iter_num < args.dfp_start_iter:
                 # 阶段一：基础训练
                 loss = train_stage_one(model, sampled_batch, optimizer, consistency_criterion, 
-                                     dice_loss, cov_dfp, iter_num, writer, data_processor)
+                                     dice_loss, cov_dfp, iter_num, writer)
             else:
                 # 阶段二：DFP训练
                 loss = train_stage_two(model, sampled_batch, optimizer, selector_optimizer,
-                                     consistency_criterion, dice_loss, cov_dfp, iter_num, writer, data_processor)
+                                     consistency_criterion, dice_loss, cov_dfp, iter_num, writer)
 
             iter_num += 1
             
             # 日志记录
             if iter_num % 50 == 0:
                 logging.info(f'iteration {iter_num}: loss: {loss:.4f}, lr: {lr_:.6f}')
-                # 打印数据处理统计
-                stats = data_processor.get_stats()
-                if stats['shape_fixes'] > 0:
-                    logging.info(f'数据处理统计: {stats}')
 
             # 保存模型
             if iter_num % 2000 == 0:
@@ -592,9 +571,8 @@ if __name__ == "__main__":
     torch.save(model.state_dict(), save_mode_path)
     logging.info("save final model to {}".format(save_mode_path))
     
-    # 打印最终统计
-    final_stats = data_processor.get_stats()
-    logging.info(f"训练完成，数据处理最终统计: {final_stats}")
+    # 训练完成
+    logging.info("训练完成")
     
     if writer:
         writer.close()
