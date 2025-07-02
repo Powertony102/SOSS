@@ -44,22 +44,54 @@ parser.add_argument('--lambda_separate', type=float, default=0.05, help='weight 
 FLAGS = parser.parse_args()
 os.environ['CUDA_VISIBLE_DEVICES'] = FLAGS.gpu
 
-# 修改snapshot_path构建方式，与训练脚本保持一致
-snapshot_path = "./model/ACDC_{}_{}_dfp{}_memory{}_feat{}_compact{}_separate{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}/{}".format(
-    FLAGS.exp,
-    FLAGS.labelnum,
-    FLAGS.num_dfp,
-    FLAGS.memory_num,
-    FLAGS.embedding_dim,
-    FLAGS.lambda_compact,
-    FLAGS.lambda_separate,
-    FLAGS.num_filtered,
-    FLAGS.consistency,
-    FLAGS.consistency_rampup,
-    FLAGS.consistency_o,
-    FLAGS.max_iteration,
-    FLAGS.seed,
-    FLAGS.model)
+# 创建多个可能的路径变体，以匹配训练脚本的实际行为
+def find_model_snapshot_path():
+    """查找实际存在的模型路径"""
+    # 可能的路径变体
+    path_variants = [
+        # 变体1：exp包含模型名（训练时可能的情况）
+        "./model/ACDC_{}_{}_{}_dfp{}_memory{}_feat{}_compact{}_separate{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}/{}".format(
+            FLAGS.exp, FLAGS.model, FLAGS.labelnum, FLAGS.num_dfp, FLAGS.memory_num, FLAGS.embedding_dim,
+            FLAGS.lambda_compact, FLAGS.lambda_separate, FLAGS.num_filtered, 
+            int(FLAGS.consistency), FLAGS.consistency_rampup, FLAGS.consistency_o,
+            FLAGS.max_iteration, FLAGS.seed, FLAGS.model),
+        # 变体2：标准格式（整数consistency）
+        "./model/ACDC_{}_{}_dfp{}_memory{}_feat{}_compact{}_separate{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}/{}".format(
+            FLAGS.exp, FLAGS.labelnum, FLAGS.num_dfp, FLAGS.memory_num, FLAGS.embedding_dim,
+            FLAGS.lambda_compact, FLAGS.lambda_separate, FLAGS.num_filtered, 
+            int(FLAGS.consistency), FLAGS.consistency_rampup, FLAGS.consistency_o,
+            FLAGS.max_iteration, FLAGS.seed, FLAGS.model),
+        # 变体3：浮点数consistency
+        "./model/ACDC_{}_{}_dfp{}_memory{}_feat{}_compact{}_separate{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}/{}".format(
+            FLAGS.exp, FLAGS.labelnum, FLAGS.num_dfp, FLAGS.memory_num, FLAGS.embedding_dim,
+            FLAGS.lambda_compact, FLAGS.lambda_separate, FLAGS.num_filtered, 
+            FLAGS.consistency, FLAGS.consistency_rampup, FLAGS.consistency_o,
+            FLAGS.max_iteration, FLAGS.seed, FLAGS.model),
+        # 变体4：exp包含模型名+浮点数consistency
+        "./model/ACDC_{}_{}_{}_dfp{}_memory{}_feat{}_compact{}_separate{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}/{}".format(
+            FLAGS.exp, FLAGS.model, FLAGS.labelnum, FLAGS.num_dfp, FLAGS.memory_num, FLAGS.embedding_dim,
+            FLAGS.lambda_compact, FLAGS.lambda_separate, FLAGS.num_filtered, 
+            FLAGS.consistency, FLAGS.consistency_rampup, FLAGS.consistency_o,
+            FLAGS.max_iteration, FLAGS.seed, FLAGS.model)
+    ]
+    
+    # 检查哪个路径存在
+    for path in path_variants:
+        if os.path.exists(path):
+            print(f"找到模型路径: {path}")
+            return path
+    
+    # 如果都不存在，打印所有尝试的路径以便调试
+    print("未找到匹配的模型路径，尝试的路径包括：")
+    for i, path in enumerate(path_variants, 1):
+        print(f"变体{i}: {path}")
+    
+    return None
+
+snapshot_path = find_model_snapshot_path()
+if snapshot_path is None:
+    print("错误：无法找到模型路径!")
+    exit(1)
 
 test_save_path = FLAGS.root_path + "model/{}_{}_{}_labeled/{}_predictions/".format(FLAGS.dataset_name, FLAGS.exp,
                                                                                    FLAGS.labelnum, FLAGS.model)
@@ -110,7 +142,8 @@ def calculate_metric_percase(pred, gt):
         
         # 计算HD95（如果medpy可用）
         try:
-            hd95 = metric.binary.hd95(pred, gt)
+            from medpy import metric as medpy_metric
+            hd95 = medpy_metric.binary.hd95(pred, gt)
         except:
             hd95 = 0  # 如果计算失败，设为0
         
@@ -263,6 +296,10 @@ def test_all_case_acdc(net, val_images, val_labels, val_patient_ids, val_frame_t
 
 def test_calculate_metric():
     """主测试函数"""
+    # 确保snapshot_path不为None
+    if snapshot_path is None:
+        return 'Cannot find model snapshot path!'
+        
     net = net_factory(net_type=FLAGS.model, in_chns=1, class_num=num_classes, mode="test")
     
     # 查找最终迭代的模型文件
