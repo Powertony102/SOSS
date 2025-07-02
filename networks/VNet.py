@@ -321,7 +321,7 @@ class corf(nn.Module):
             return out_seg1, out_seg2, embedding1, embedding2, features1, features2
         else:
             return output_dict
-
+    
 
 class ConvBlock2D(nn.Module):
     def __init__(self, n_stages, n_filters_in, n_filters_out, normalization='none'):

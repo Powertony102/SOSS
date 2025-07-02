@@ -235,14 +235,11 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
     loss_s = 0
     for i in range(num_outputs):
         y = outputs_list[i][:labeled_bs, ...]
-        y_prob = F.softmax(y, dim=1)
-        
-        # ACDC多类别Dice损失
-        loss_dice_class = 0
-        for class_idx in range(1, num_classes):  # 跳过背景类
-            loss_dice_class += dice_loss(y_prob[:, class_idx, ...], 
-                                       (label_batch[:labeled_bs, ...] == class_idx).float())
-        loss_s += loss_dice_class / (num_classes - 1)
+        # 计算CrossEntropy + Dice组合损失，这是医学图像分割的标准做法
+        loss_ce = ce_loss(y, label_batch[:labeled_bs, ...])
+        loss_dice = dice_loss(y, label_batch[:labeled_bs, ...], softmax=True)
+        # 加权组合两种损失，通常CE和Dice权重相等
+        loss_s += (loss_ce + loss_dice) / 2.0
 
         y_all = outputs_list[i]
         y_prob_all = F.softmax(y_all, dim=1)
@@ -358,14 +355,11 @@ def train_stage_two(model, sampled_batch, optimizer, selector_optimizer, consist
     loss_s = 0
     for i, outputs in enumerate(outputs_list):
         y = outputs[:labeled_bs, ...]
-        y_prob = F.softmax(y, dim=1)
-        
-        # ACDC多类别Dice损失
-        loss_dice_class = 0
-        for class_idx in range(1, num_classes):
-            loss_dice_class += dice_loss(y_prob[:, class_idx, ...], 
-                                       (label_batch[:labeled_bs, ...] == class_idx).float())
-        loss_s += loss_dice_class / (num_classes - 1)
+        # 计算CrossEntropy + Dice组合损失，这是医学图像分割的标准做法
+        loss_ce = ce_loss(y, label_batch[:labeled_bs, ...])
+        loss_dice = dice_loss(y, label_batch[:labeled_bs, ...], softmax=True)
+        # 加权组合两种损失，通常CE和Dice权重相等
+        loss_s += (loss_ce + loss_dice) / 2.0
 
     # 一致性损失
     y_ori = torch.stack([F.softmax(out, dim=1) for out in outputs_list])
@@ -605,16 +599,10 @@ if __name__ == "__main__":
     
     consistency_criterion = losses.mse_loss
     
-    # 创建简单的二元Dice损失函数
-    def binary_dice_loss(pred, target, smooth=1e-8):
-        """二元Dice损失函数，适用于单类别预测"""
-        pred = pred.contiguous().view(-1)
-        target = target.contiguous().view(-1)
-        intersection = (pred * target).sum()
-        dice = (2. * intersection + smooth) / (pred.sum() + target.sum() + smooth)
-        return 1 - dice
-    
-    dice_loss = binary_dice_loss
+    # 使用多类别Dice损失函数，与train_cov_dfp_3d.py保持一致的风格
+    dice_loss = losses.DiceLoss(n_classes=num_classes)
+    # 添加CrossEntropy损失，这是医学图像分割的标准做法
+    ce_loss = torch.nn.CrossEntropyLoss()
     iter_num = 0
     best_dice = 0
     max_epoch = max_iterations // len(trainloader) + 1
