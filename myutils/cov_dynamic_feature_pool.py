@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import numpy as np
 from typing import List, Optional, Tuple
 import logging
@@ -26,6 +27,9 @@ class CovarianceDynamicFeaturePool:
         # 全局特征池 F_global (存储为GPU张量列表)
         self.global_features = []  # List of GPU tensors
         
+        # 新增：存储特征对应的标签信息
+        self.global_labels = []  # List of label tensors
+        
         # 多个DFP，每个DFP存储特征张量
         self.dfps = [None for _ in range(num_dfp)]
         
@@ -35,14 +39,24 @@ class CovarianceDynamicFeaturePool:
         # 每个DFP的中心特征（均值）(GPU张量)
         self.dfp_centers = None
         
+        # 新增：EMA更新相关参数
+        self.ema_momentum = 0.9
+        self.previous_centers = None
+        
+        # 新增：Two-Phase k-means相关参数
+        self.use_two_phase_kmeans = False
+        self.num_classes = 2  # 默认二分类
+        self.prototypes_per_class = None  # 每类子-prototype数量
+        
         # 是否已完成DFP构建
         self.dfps_built = False
         
-    def add_to_global_pool(self, features: torch.Tensor):
+    def add_to_global_pool(self, features: torch.Tensor, labels: torch.Tensor = None):
         """添加特征到全局特征池
         
         Args:
             features: 形状 [N, D] 的特征张量
+            labels: 形状 [N] 的标签张量，用于Two-Phase k-means（可选）
         """
         if features.dim() != 2:
             raise ValueError(f"Features should be 2D tensor, got {features.dim()}D")
@@ -50,6 +64,17 @@ class CovarianceDynamicFeaturePool:
         # 确保特征在正确的设备上并detach
         features_gpu = features.detach().to(self.device)
         self.global_features.append(features_gpu)
+        
+        # 添加标签信息（如果提供）
+        if labels is not None:
+            if labels.dim() != 1 or labels.shape[0] != features.shape[0]:
+                raise ValueError(f"Labels should be 1D tensor with same batch size as features")
+            labels_gpu = labels.detach().to(self.device)
+            self.global_labels.append(labels_gpu)
+        else:
+            # 如果没有提供标签，使用-1作为未标记标签
+            dummy_labels = torch.full((features.shape[0],), -1, device=self.device)
+            self.global_labels.append(dummy_labels)
         
         # 限制全局池大小
         if self.get_global_pool_size() > self.max_global_features:
@@ -106,8 +131,12 @@ class CovarianceDynamicFeaturePool:
         if not success:
             return False
         
-        # 第二步：通过度量学习优化DFP质量
-        success = self._optimize_dfps_with_metric_learning(F_global, max_optimization_iterations, learning_rate)
+        # 第二步：选择构建方法（Two-Phase k-means 或 标准度量学习）
+        if self.use_two_phase_kmeans:
+            success = self._build_dfps_with_two_phase_kmeans(F_global, max_optimization_iterations, learning_rate)
+        else:
+            success = self._optimize_dfps_with_metric_learning(F_global, max_optimization_iterations, learning_rate)
+        
         if not success:
             return False
         
@@ -313,6 +342,261 @@ class CovarianceDynamicFeaturePool:
         separate_loss = self.compute_inter_pool_separation_loss(margin=1.0)
         
         return compact_loss.item(), separate_loss.item()
+    
+    def enable_two_phase_kmeans(self, num_classes: int = 2, prototypes_per_class: List[int] = None):
+        """启用Two-Phase k-means模式
+        
+        Args:
+            num_classes: 类别数量
+            prototypes_per_class: 每个类别的子-prototype数量，如果为None则平均分配
+        """
+        self.use_two_phase_kmeans = True
+        self.num_classes = num_classes
+        
+        if prototypes_per_class is None:
+            # 平均分配DFP给各个类别
+            base_count = self.num_dfp // num_classes
+            remainder = self.num_dfp % num_classes
+            self.prototypes_per_class = [base_count + (1 if i < remainder else 0) 
+                                       for i in range(num_classes)]
+        else:
+            if len(prototypes_per_class) != num_classes:
+                raise ValueError(f"prototypes_per_class length ({len(prototypes_per_class)}) != num_classes ({num_classes})")
+            if sum(prototypes_per_class) != self.num_dfp:
+                raise ValueError(f"Sum of prototypes_per_class ({sum(prototypes_per_class)}) != num_dfp ({self.num_dfp})")
+            self.prototypes_per_class = prototypes_per_class
+        
+        logging.info(f"Enabled Two-Phase k-means: {num_classes} classes, "
+                    f"prototypes per class: {self.prototypes_per_class}")
+    
+    def _build_dfps_with_two_phase_kmeans(self, F_global: torch.Tensor, 
+                                        max_iterations: int, learning_rate: float) -> bool:
+        """使用Two-Phase k-means构建DFP"""
+        # 获取标签信息
+        if len(self.global_labels) == 0:
+            logging.warning("No labels available for Two-Phase k-means, falling back to standard method")
+            return self._optimize_dfps_with_metric_learning(F_global, max_iterations, learning_rate)
+        
+        # 合并所有标签
+        all_labels = torch.cat(self.global_labels, dim=0)  # [N]
+        N, D = F_global.shape
+        
+        if all_labels.shape[0] != N:
+            logging.error(f"Feature-label size mismatch: {N} vs {all_labels.shape[0]}")
+            return False
+        
+        logging.info(f"Starting Two-Phase k-means with {self.num_classes} classes")
+        
+        # Phase 1: 类内聚类 - 为每个类别单独做spherical k-means
+        all_centers = []
+        dfp_idx = 0
+        
+        for class_id in range(self.num_classes):
+            # 找到当前类别的特征（只使用有标签的特征）
+            class_mask = (all_labels == class_id)
+            if not class_mask.any():
+                logging.warning(f"No features found for class {class_id}, using random initialization")
+                # 随机初始化该类的中心
+                num_prototypes = self.prototypes_per_class[class_id]
+                random_centers = torch.randn(num_prototypes, D, device=self.device) * 0.1
+                all_centers.extend([center for center in random_centers])
+                dfp_idx += num_prototypes
+                continue
+            
+            class_features = F_global[class_mask]  # [N_class, D]
+            num_prototypes = self.prototypes_per_class[class_id]
+            
+            logging.info(f"Class {class_id}: {class_features.shape[0]} features, {num_prototypes} prototypes")
+            
+            # 对当前类别做spherical k-means
+            class_centers = self._spherical_kmeans(class_features, num_prototypes, 
+                                                 max_iterations=50, tolerance=1e-4)
+            all_centers.extend([center for center in class_centers])
+            dfp_idx += num_prototypes
+        
+        # Phase 2: 使用所有子-prototype作为初始中心，进行全局优化
+        initial_centers = torch.stack(all_centers, dim=0)  # [num_dfp, D]
+        
+        logging.info(f"Phase 2: Global optimization with {initial_centers.shape[0]} initial centers")
+        
+        # 使用初始中心进行全局度量学习优化
+        success = self._optimize_dfps_with_initial_centers(F_global, initial_centers, 
+                                                         max_iterations, learning_rate)
+        
+        return success
+    
+    def _spherical_kmeans(self, features: torch.Tensor, num_clusters: int, 
+                         max_iterations: int = 100, tolerance: float = 1e-4) -> List[torch.Tensor]:
+        """Spherical k-means聚类
+        
+        Args:
+            features: 输入特征 [N, D]
+            num_clusters: 聚类数量
+            max_iterations: 最大迭代次数
+            tolerance: 收敛容差
+            
+        Returns:
+            centers: 聚类中心列表
+        """
+        N, D = features.shape
+        
+        if N < num_clusters:
+            # 特征数量少于聚类数量，直接返回所有特征作为中心
+            logging.warning(f"Features ({N}) < clusters ({num_clusters}), using all features as centers")
+            centers = []
+            for i in range(num_clusters):
+                if i < N:
+                    center = F.normalize(features[i], p=2, dim=0)
+                else:
+                    # 随机初始化额外的中心
+                    center = F.normalize(torch.randn(D, device=self.device), p=2, dim=0)
+                centers.append(center)
+            return centers
+        
+        # L2归一化特征到单位球面
+        features_normalized = F.normalize(features, p=2, dim=1)  # [N, D]
+        
+        # 随机初始化聚类中心并归一化
+        centers = F.normalize(torch.randn(num_clusters, D, device=self.device), p=2, dim=1)
+        
+        for iteration in range(max_iterations):
+            # 计算特征到中心的余弦相似度（内积）
+            similarities = torch.mm(features_normalized, centers.t())  # [N, num_clusters]
+            
+            # 分配到最相似的中心
+            assignments = torch.argmax(similarities, dim=1)  # [N]
+            
+            # 更新中心
+            new_centers = []
+            center_changed = False
+            
+            for k in range(num_clusters):
+                mask = assignments == k
+                if mask.any():
+                    # 计算分配到该中心的特征的平均值并归一化
+                    cluster_features = features_normalized[mask]
+                    new_center = torch.mean(cluster_features, dim=0)
+                    new_center = F.normalize(new_center, p=2, dim=0)
+                else:
+                    # 如果没有特征分配到该中心，保持原中心或重新随机化
+                    new_center = F.normalize(torch.randn(D, device=self.device), p=2, dim=0)
+                
+                # 检查中心是否发生变化
+                if torch.norm(new_center - centers[k]) > tolerance:
+                    center_changed = True
+                
+                new_centers.append(new_center)
+            
+            centers = torch.stack(new_centers, dim=0)
+            
+            # 检查收敛
+            if not center_changed:
+                logging.info(f"Spherical k-means converged at iteration {iteration}")
+                break
+        
+        return [centers[i] for i in range(num_clusters)]
+    
+    def _optimize_dfps_with_initial_centers(self, F_global: torch.Tensor, initial_centers: torch.Tensor,
+                                          max_iterations: int, learning_rate: float) -> bool:
+        """使用给定的初始中心进行DFP优化"""
+        N, D = F_global.shape
+        
+        # 使用提供的初始中心
+        dfp_centers = initial_centers.clone()
+        dfp_centers.requires_grad_(True)
+        
+        # 优化器
+        optimizer = torch.optim.Adam([dfp_centers], lr=learning_rate)
+        
+        best_loss = float('inf')
+        patience = 15  # 增加patience，因为Two-Phase可能需要更多时间收敛
+        no_improve_count = 0
+        
+        # 调整分离损失的margin（如建议方案所说，需要调低）
+        separation_margin = 0.6  # 从1.0降低到0.6
+        
+        logging.info(f"Starting global optimization with initial centers, margin={separation_margin}")
+        
+        for iteration in range(max_iterations):
+            optimizer.zero_grad()
+            
+            # 重新分配特征到最近的DFP中心
+            distances = torch.cdist(F_global, dfp_centers)  # [N, num_dfp]
+            assignments = torch.argmin(distances, dim=1)  # [N]
+            
+            # 计算池内紧凑性损失
+            compact_loss = self._compute_compactness_loss_from_assignments(F_global, assignments, dfp_centers)
+            
+            # 计算池间分离损失（使用调整后的margin）
+            separate_loss = self._compute_separation_loss_from_centers_with_margin(dfp_centers, separation_margin)
+            
+            # 总损失（提高分离损失权重，如建议方案所说）
+            total_loss = compact_loss + 0.15 * separate_loss  # 从0.1提高到0.15
+            
+            total_loss.backward()
+            optimizer.step()
+            
+            # 记录进度
+            if iteration % 10 == 0:
+                logging.info(f"Global optimization iter {iteration}: total_loss={total_loss.item():.6f}, "
+                           f"compact={compact_loss.item():.6f}, separate={separate_loss.item():.6f}")
+            
+            # 早停检查
+            if total_loss.item() < best_loss:
+                best_loss = total_loss.item()
+                no_improve_count = 0
+            else:
+                no_improve_count += 1
+                if no_improve_count >= patience:
+                    logging.info(f"Early stopping at iteration {iteration}")
+                    break
+        
+        # 使用优化后的中心重新分配DFP
+        with torch.no_grad():
+            distances = torch.cdist(F_global, dfp_centers)
+            assignments = torch.argmin(distances, dim=1)
+            self._update_dfps_from_assignments(F_global, assignments)
+            
+            # EMA更新中心
+            self._update_centers_with_ema(dfp_centers.detach())
+        
+        logging.info("Two-Phase k-means global optimization completed")
+        return True
+    
+    def _compute_separation_loss_from_centers_with_margin(self, centers: torch.Tensor, margin: float) -> torch.Tensor:
+        """计算基于中心的池间分离损失（自定义margin）"""
+        total_loss = torch.tensor(0.0, device=self.device)
+        num_pairs = 0
+        
+        for i in range(self.num_dfp):
+            for j in range(i + 1, self.num_dfp):
+                center_i = centers[i]  # [D]
+                center_j = centers[j]  # [D]
+                
+                # 计算中心间距离的平方
+                distance_squared = torch.sum((center_i - center_j) ** 2)
+                
+                # Softplus分离损失
+                separation_loss = torch.nn.functional.softplus(margin - distance_squared)
+                total_loss = total_loss + separation_loss
+                num_pairs += 1
+        
+        if num_pairs > 0:
+            return total_loss / num_pairs
+        else:
+            return torch.tensor(0.0, device=self.device)
+    
+    def _update_centers_with_ema(self, new_centers: torch.Tensor):
+        """使用EMA更新DFP中心"""
+        if self.previous_centers is None:
+            self.previous_centers = new_centers.clone()
+            self.dfp_centers = new_centers.clone()
+        else:
+            # EMA更新：μ_t = 0.9 * μ_{t-1} + 0.1 * μ_{k-means}
+            self.dfp_centers = self.ema_momentum * self.previous_centers + (1 - self.ema_momentum) * new_centers
+            self.previous_centers = self.dfp_centers.clone()
+        
+        logging.info(f"Updated DFP centers with EMA (momentum={self.ema_momentum})")
     
     def _assign_features_to_dfps(self, F_global: torch.Tensor):
         """将全局特征分配到不同的DFP中 (GPU版本)"""

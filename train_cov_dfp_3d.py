@@ -69,9 +69,15 @@ parser.add_argument('--use_dfp', action='store_true', help='whether to use dynam
 parser.add_argument('--num_dfp', type=int, default=8, help='number of dynamic feature pools')
 parser.add_argument('--dfp_start_iter', type=int, default=2000, help='iteration to start building DFPs')
 parser.add_argument('--selector_train_iter', type=int, default=50, help='iterations for training selector')
-parser.add_argument('--dfp_reconstruct_interval', type=int, default=1000, help='interval for reconstructing DFPs')
+parser.add_argument('--dfp_reconstruct_interval', type=int, default=3000, help='interval for reconstructing DFPs')
 parser.add_argument('--max_global_features', type=int, default=50000, help='maximum global features')
 parser.add_argument('--embedding_dim', type=int, default=64, help='embedding dimension')
+
+# Two-Phase k-means参数（新增）
+parser.add_argument('--use_two_phase_kmeans', action='store_true', default=True, help='use Two-Phase k-means for DFP construction')
+parser.add_argument('--confidence_threshold', type=float, default=0.9, help='confidence threshold for high-quality features')
+parser.add_argument('--ema_momentum', type=float, default=0.9, help='EMA momentum for center updates')
+parser.add_argument('--spherical_kmeans_iterations', type=int, default=50, help='max iterations for spherical k-means')
 
 # 度量学习参数（新增）
 parser.add_argument('--lambda_compact', type=float, default=0.1, help='weight for intra-pool compactness loss')
@@ -184,11 +190,12 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
     lambda_c = get_lambda_c(iter_num // 150)
     total_loss = args.lamda * loss_s + lambda_c * loss_c + args.lambda_hcc * loss_hcc
 
-    # 添加特征到全局池
+    # 添加特征到全局池（包含标签信息用于Two-Phase k-means）
     if args.use_dfp and cov_dfp is not None:
-        # 获取正确预测的特征
+        # 获取标记样本的特征和标签
         labeled_features_v = embedding_v[:args.labeled_bs, ...]
         labeled_features_a = embedding_a[:args.labeled_bs, ...]
+        labeled_labels = label_batch[:args.labeled_bs, ...]  # [labeled_bs, H, W, D]
         
         # 转换格式：[batch, h, w, d, feat_dim]
         labeled_features_v = labeled_features_v.permute(0, 2, 3, 4, 1).contiguous()
@@ -203,8 +210,69 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
         # 平均两个分支的特征
         combined_features = (proj_labeled_features_v + proj_labeled_features_a) / 2
         
-        # 添加到全局特征池
-        cov_dfp.add_to_global_pool(combined_features)
+        # 准备对应的标签（展平到与特征相同的维度）
+        flattened_labels = labeled_labels.view(-1)  # [labeled_bs * H * W * D]
+        
+        # 只保留有效的像素位置（非背景，假设0是背景）
+        # 或者使用高置信度的预测作为伪标签
+        with torch.no_grad():
+            pred_probs = torch.softmax(outputs_v[:args.labeled_bs], dim=1)  # [labeled_bs, num_classes, H, W, D]
+            pred_confidence = torch.max(pred_probs, dim=1)[0]  # [labeled_bs, H, W, D]
+            pred_labels = torch.argmax(pred_probs, dim=1)  # [labeled_bs, H, W, D]
+            
+            # 使用高置信度区域 (置信度 > 0.9)
+            high_conf_mask = (pred_confidence > 0.9).view(-1)  # [labeled_bs * H * W * D]
+            
+            if high_conf_mask.any():
+                # 使用高置信度的预测作为标签
+                final_features = combined_features[high_conf_mask]
+                final_labels = pred_labels.view(-1)[high_conf_mask]
+                
+                # 添加到全局特征池（包含标签）
+                cov_dfp.add_to_global_pool(final_features, final_labels)
+            else:
+                # 如果没有高置信度预测，使用真实标签
+            # 获取标记样本的特征和标签
+            labeled_features_v = embedding_v[:args.labeled_bs, ...]
+            labeled_features_a = embedding_a[:args.labeled_bs, ...]
+            labeled_labels = label_batch[:args.labeled_bs, ...]  # [labeled_bs, H, W, D]
+            
+            # 转换格式：[batch, h, w, d, feat_dim]
+            labeled_features_v = labeled_features_v.permute(0, 2, 3, 4, 1).contiguous()
+            labeled_features_a = labeled_features_a.permute(0, 2, 3, 4, 1).contiguous()
+            
+            # 投影到特征空间
+            model.eval()
+            proj_labeled_features_v = model.projection_head1(labeled_features_v.view(-1, labeled_features_v.shape[-1]))
+            proj_labeled_features_a = model.projection_head2(labeled_features_a.view(-1, labeled_features_a.shape[-1]))
+            model.train()
+            
+            # 平均两个分支的特征
+            combined_features = (proj_labeled_features_v + proj_labeled_features_a) / 2
+            
+            # 准备对应的标签（展平到与特征相同的维度）
+            flattened_labels = labeled_labels.view(-1)  # [labeled_bs * H * W * D]
+            
+            # 只保留有效的像素位置（非背景，假设0是背景）
+            # 或者使用高置信度的预测作为伪标签
+            with torch.no_grad():
+                pred_probs = torch.softmax(outputs_v[:args.labeled_bs], dim=1)  # [labeled_bs, num_classes, H, W, D]
+                pred_confidence = torch.max(pred_probs, dim=1)[0]  # [labeled_bs, H, W, D]
+                pred_labels = torch.argmax(pred_probs, dim=1)  # [labeled_bs, H, W, D]
+                
+                # 使用高置信度区域 (置信度 > 0.9)
+                high_conf_mask = (pred_confidence > 0.9).view(-1)  # [labeled_bs * H * W * D]
+                
+                if high_conf_mask.any():
+                    # 使用高置信度的预测作为标签
+                    final_features = combined_features[high_conf_mask]
+                    final_labels = pred_labels.view(-1)[high_conf_mask]
+                    
+                    # 添加到全局特征池（包含标签）
+                    cov_dfp.add_to_global_pool(final_features, final_labels)
+                else:
+                    # 如果没有高置信度预测，使用真实标签
+                    cov_dfp.add_to_global_pool(combined_features, flattened_labels)
 
     optimizer.zero_grad()
     total_loss.backward()
@@ -452,7 +520,15 @@ if __name__ == "__main__":
             max_global_features=args.max_global_features,
             device=device
         )
+        
+        # 启用Two-Phase k-means模式（推荐）
+        cov_dfp.enable_two_phase_kmeans(
+            num_classes=num_classes,  # 2 for binary segmentation
+            prototypes_per_class=None  # 自动平均分配
+        )
+        
         logging.info(f"CovarianceDynamicFeaturePool created on device: {device}")
+        logging.info(f"Two-Phase k-means enabled with {num_classes} classes")
 
     # 创建数据加载器
     if args.dataset_name == "LA":
