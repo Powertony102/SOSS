@@ -232,47 +232,7 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
                 cov_dfp.add_to_global_pool(final_features, final_labels)
             else:
                 # 如果没有高置信度预测，使用真实标签
-            # 获取标记样本的特征和标签
-            labeled_features_v = embedding_v[:args.labeled_bs, ...]
-            labeled_features_a = embedding_a[:args.labeled_bs, ...]
-            labeled_labels = label_batch[:args.labeled_bs, ...]  # [labeled_bs, H, W, D]
-            
-            # 转换格式：[batch, h, w, d, feat_dim]
-            labeled_features_v = labeled_features_v.permute(0, 2, 3, 4, 1).contiguous()
-            labeled_features_a = labeled_features_a.permute(0, 2, 3, 4, 1).contiguous()
-            
-            # 投影到特征空间
-            model.eval()
-            proj_labeled_features_v = model.projection_head1(labeled_features_v.view(-1, labeled_features_v.shape[-1]))
-            proj_labeled_features_a = model.projection_head2(labeled_features_a.view(-1, labeled_features_a.shape[-1]))
-            model.train()
-            
-            # 平均两个分支的特征
-            combined_features = (proj_labeled_features_v + proj_labeled_features_a) / 2
-            
-            # 准备对应的标签（展平到与特征相同的维度）
-            flattened_labels = labeled_labels.view(-1)  # [labeled_bs * H * W * D]
-            
-            # 只保留有效的像素位置（非背景，假设0是背景）
-            # 或者使用高置信度的预测作为伪标签
-            with torch.no_grad():
-                pred_probs = torch.softmax(outputs_v[:args.labeled_bs], dim=1)  # [labeled_bs, num_classes, H, W, D]
-                pred_confidence = torch.max(pred_probs, dim=1)[0]  # [labeled_bs, H, W, D]
-                pred_labels = torch.argmax(pred_probs, dim=1)  # [labeled_bs, H, W, D]
-                
-                # 使用高置信度区域 (置信度 > 0.9)
-                high_conf_mask = (pred_confidence > 0.9).view(-1)  # [labeled_bs * H * W * D]
-                
-                if high_conf_mask.any():
-                    # 使用高置信度的预测作为标签
-                    final_features = combined_features[high_conf_mask]
-                    final_labels = pred_labels.view(-1)[high_conf_mask]
-                    
-                    # 添加到全局特征池（包含标签）
-                    cov_dfp.add_to_global_pool(final_features, final_labels)
-                else:
-                    # 如果没有高置信度预测，使用真实标签
-                    cov_dfp.add_to_global_pool(combined_features, flattened_labels)
+                cov_dfp.add_to_global_pool(combined_features, flattened_labels)
 
     optimizer.zero_grad()
     total_loss.backward()
