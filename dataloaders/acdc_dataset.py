@@ -123,9 +123,18 @@ class ACDCDataSet(Dataset):
         if self.transform:
             sample = self.transform(sample)
         
-        # 转换为torch张量
-        image = torch.from_numpy(sample['image']).float()
-        label = torch.from_numpy(sample['label']).long()
+        # 转换为torch张量（解决负步长问题）
+        image_array = sample['image']
+        label_array = sample['label']
+        
+        # 确保数组是连续的，解决负步长问题
+        if not image_array.flags['C_CONTIGUOUS']:
+            image_array = image_array.copy()
+        if not label_array.flags['C_CONTIGUOUS']:
+            label_array = label_array.copy()
+            
+        image = torch.from_numpy(image_array).float()
+        label = torch.from_numpy(label_array).long()
         
         # 最终验证格式
         if len(image.shape) != 3 or image.shape[0] != 1:
@@ -163,8 +172,8 @@ class ACDCDataSet(Dataset):
 def random_rot_flip(image, label):
     """随机旋转和翻转"""
     k = np.random.randint(0, 4)
-    image = np.rot90(image, k)
-    label = np.rot90(label, k)
+    image = np.rot90(image, k).copy()
+    label = np.rot90(label, k).copy()
     axis = np.random.randint(0, 2)
     image = np.flip(image, axis=axis).copy()
     label = np.flip(label, axis=axis).copy()
@@ -192,14 +201,14 @@ class RandomGenerator(object):
             angle = random.uniform(-10, 10)
             # 这里简化处理，实际可以使用更复杂的旋转
             
-        # 随机翻转
+        # 随机翻转（使用copy避免负步长）
         if random.random() > 0.5:
-            image = np.fliplr(image)
-            label = np.fliplr(label)
+            image = np.fliplr(image).copy()
+            label = np.fliplr(label).copy()
             
         if random.random() > 0.5:
-            image = np.flipud(image)
-            label = np.flipud(label)
+            image = np.flipud(image).copy()
+            label = np.flipud(label).copy()
         
         # 确保输出格式正确
         # image应该是 [C, H, W] 格式
