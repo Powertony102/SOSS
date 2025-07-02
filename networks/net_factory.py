@@ -1,17 +1,29 @@
 from networks.unet import UNet
-from networks.VNet import corf
+from networks.VNet import VNet, corf
 
 
-def net_factory(net_type="unet", in_chns=1, class_num=2, mode = "train", **kwargs):
+def net_factory(net_type="unet", in_chns=1, class_num=2, mode="train", **kwargs):
+    net = None
+    
+    # 处理模型名称变体
+    if net_type.startswith("corn"):
+        net_type = "corn"
+    elif net_type.startswith("unet"):
+        net_type = "unet"
+    elif net_type.startswith("vnet"):
+        net_type = "vnet"
+    
     if net_type == "unet":
         net = UNet(in_chns=in_chns, class_num=class_num).cuda()
-    if net_type == "vnet" and mode == "train":
+    elif net_type == "vnet" and mode == "train":
         net = VNet(n_channels=in_chns, n_classes=class_num, normalization='batchnorm', has_dropout=True).cuda()
-    if net_type == "vnet" and mode == "test":
+    elif net_type == "vnet" and mode == "test":
         net = VNet(n_channels=in_chns, n_classes=class_num, normalization='batchnorm', has_dropout=False).cuda()
-
     elif net_type == "corn" and mode == "train":
         net = corf(n_channels=in_chns, n_classes=class_num, normalization='batchnorm', has_dropout=True).cuda()
     elif net_type == "corn" and mode == "test":
         net = corf(n_channels=in_chns, n_classes=class_num, normalization='batchnorm', has_dropout=False).cuda()
+    else:
+        raise ValueError(f"Unsupported network type: {net_type} with mode: {mode}")
+    
     return net
