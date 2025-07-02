@@ -1,9 +1,0 @@
-Wandb initialized with project: SOSS
-Model moved to GPU
-CovarianceDynamicFeaturePool created on device: cuda
-Traceback (most recent call last):
-  File "/home/jovyan/work/SOSS/train_cov_dfp_3d.py", line 403, in <module>
-    db_train = LAHeart(base_dir=train_data_path,
-  File "/home/jovyan/work/SOSS/dataloaders/dataset.py", line 103, in __init__
-    with open(train_path, 'r') as f:
-FileNotFoundError: [Errno 2] No such file or directory: '/path/to/your/LA_dataset/train.list'
