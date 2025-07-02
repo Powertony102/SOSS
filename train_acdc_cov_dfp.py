@@ -228,12 +228,12 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
             correct_a = (pred_a == label_batch[:labeled_bs]).float()
         
         # 添加正确预测的特征到全局池
-        cov_dfp.add_features_to_global_pool(
-            proj_labeled_features_v.view(*labeled_features_v.shape[:-1], -1),
-            proj_labeled_features_a.view(*labeled_features_a.shape[:-1], -1),
-            label_batch[:labeled_bs],
-            correct_v, correct_a
-        )
+        # 将两个特征合并后添加到全局池
+        combined_features = torch.cat([
+            proj_labeled_features_v.view(-1, args.embedding_dim),
+            proj_labeled_features_a.view(-1, args.embedding_dim)
+        ], dim=0)
+        cov_dfp.add_to_global_pool(combined_features)
 
     optimizer.zero_grad()
     total_loss.backward()
@@ -270,9 +270,12 @@ def train_stage_two(model, sampled_batch, optimizer, selector_optimizer, consist
     outputs_v, outputs_a, embedding_v, embedding_a, features_v, features_a = model(volume_batch, with_hcc=True)
     
     # 构建DFPs
-    if cov_dfp.should_build_dfps(iter_num):
-        cov_dfp.build_dynamic_feature_pools()
-        logging.info(f"Built DFPs at iteration {iter_num}")
+    if not cov_dfp.dfps_built and cov_dfp.get_global_pool_size() > args.num_dfp * 10:
+        success = cov_dfp.build_dfps()
+        if success:
+            logging.info(f"Built DFPs at iteration {iter_num}")
+        else:
+            logging.warning(f"Failed to build DFPs at iteration {iter_num}")
 
     # 计算基础损失
     outputs_list = [outputs_v, outputs_a]
@@ -308,7 +311,7 @@ def train_stage_two(model, sampled_batch, optimizer, selector_optimizer, consist
                                 scale=args.hcc_scale)
 
     # 度量学习损失
-    loss_compact, loss_separate = 0, 0
+    loss_compact, loss_separate = torch.tensor(0.0, device='cuda'), torch.tensor(0.0, device='cuda')
     if cov_dfp.dfps_built:
         # 对于2D数据，调整特征维度
         if len(embedding_v.shape) == 4:
@@ -321,8 +324,25 @@ def train_stage_two(model, sampled_batch, optimizer, selector_optimizer, consist
         proj_embedding_v = proj_embedding_v.view(*embedding_v_reshaped.shape[:-1], -1)
         proj_embedding_a = proj_embedding_a.view(*embedding_a_reshaped.shape[:-1], -1)
         
-        loss_compact, loss_separate = cov_dfp.compute_metric_learning_loss(
-            proj_embedding_v, proj_embedding_a, label_batch, args.separation_margin
+        # 计算度量学习损失
+        # 首先需要将特征按DFP分组
+        batch_features_by_dfp = {}
+        # 这里需要根据实际的Selector预测来分组特征
+        # 暂时使用简单的分组方式
+        batch_size = proj_embedding_v.shape[0]
+        for i in range(args.num_dfp):
+            # 简单分配：每个DFP分配一部分特征
+            start_idx = i * (batch_size // args.num_dfp)
+            end_idx = (i + 1) * (batch_size // args.num_dfp) if i < args.num_dfp - 1 else batch_size
+            if start_idx < batch_size:
+                combined_features = torch.cat([
+                    proj_embedding_v[start_idx:end_idx].view(-1, args.embedding_dim),
+                    proj_embedding_a[start_idx:end_idx].view(-1, args.embedding_dim)
+                ], dim=0)
+                batch_features_by_dfp[i] = combined_features
+        
+        loss_compact, loss_separate = cov_dfp.compute_metric_learning_losses(
+            batch_features_by_dfp, args.separation_margin
         )
 
     lambda_c = get_lambda_c(iter_num // 150)
@@ -410,13 +430,12 @@ if __name__ == "__main__":
     # 初始化DFP
     cov_dfp = None
     if args.use_dfp:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
         cov_dfp = CovarianceDynamicFeaturePool(
-            num_pools=args.num_dfp,
             feature_dim=args.embedding_dim,
-            num_classes=num_classes,
-            start_iter=args.dfp_start_iter,
-            reconstruct_interval=args.dfp_reconstruct_interval,
-            max_global_features=args.max_global_features
+            num_dfp=args.num_dfp,
+            max_global_features=args.max_global_features,
+            device=device
         )
 
     # 创建数据加载器
