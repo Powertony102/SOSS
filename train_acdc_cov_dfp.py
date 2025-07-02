@@ -473,15 +473,52 @@ if __name__ == "__main__":
         )
 
     # 创建数据加载器
+    # 加载切片索引信息
+    slice_indices_path = os.path.join(train_data_path, 'slice_indices.txt')
+    labeled_slices_count = args.labelnum
+    
+    if os.path.exists(slice_indices_path):
+        # 从文件读取实际的切片划分信息
+        with open(slice_indices_path, 'r') as f:
+            for line in f:
+                if line.startswith('labeled_slices_count:'):
+                    actual_labeled_count = int(line.split(':')[1].strip())
+                    print(f"数据集中标注切片数量: {actual_labeled_count}")
+                    # 如果用户指定的labelnum超过实际标注数量，使用实际数量
+                    if args.labelnum > actual_labeled_count:
+                        print(f"警告: 指定的labelnum({args.labelnum})超过实际标注数量({actual_labeled_count})，使用实际数量")
+                        labeled_slices_count = actual_labeled_count
+                    break
+    
     db_train = ACDCDataSet(base_dir=train_data_path,
                           list_dir=None,
                           split='train',
                           transform=RandomGenerator(patch_size))
 
-    labelnum = args.labelnum
-    labeled_idxs = list(range(labelnum))
-    unlabeled_idxs = list(range(labelnum, len(db_train)))
-    batch_sampler = TwoStreamBatchSampler(labeled_idxs, unlabeled_idxs, args.batch_size, args.batch_size - labeled_bs)
+    print(f"训练数据集加载完成，总切片数: {len(db_train)}")
+    print(f"使用标注切片数: {labeled_slices_count}")
+    
+    # 半监督学习的数据索引
+    labeled_idxs = list(range(labeled_slices_count))  # 前labeled_slices_count个是标注数据
+    unlabeled_idxs = list(range(labeled_slices_count, len(db_train)))  # 剩余的是未标注数据
+    
+    print(f"标注数据索引: 0-{labeled_slices_count-1} ({len(labeled_idxs)} 个)")
+    print(f"未标注数据索引: {labeled_slices_count}-{len(db_train)-1} ({len(unlabeled_idxs)} 个)")
+    
+    # 确保批次大小合理
+    if len(labeled_idxs) < args.labeled_bs:
+        print(f"警告: 标注数据数量({len(labeled_idxs)})小于labeled_bs({args.labeled_bs})，调整labeled_bs为{len(labeled_idxs)}")
+        args.labeled_bs = len(labeled_idxs)
+        labeled_bs = args.labeled_bs
+    
+    if len(unlabeled_idxs) < (args.batch_size - args.labeled_bs):
+        unlabeled_bs = len(unlabeled_idxs)
+        total_bs = args.labeled_bs + unlabeled_bs
+        print(f"警告: 未标注数据不足，调整batch_size为{total_bs}")
+        args.batch_size = total_bs
+        
+    batch_sampler = TwoStreamBatchSampler(labeled_idxs, unlabeled_idxs, 
+                                        args.batch_size, args.batch_size-labeled_bs)
 
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
