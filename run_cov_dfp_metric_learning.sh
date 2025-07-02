@@ -33,9 +33,9 @@ MAX_GLOBAL_FEATURES=50000
 EMBEDDING_DIM=128
 
 # 度量学习参数（新增）
-LAMBDA_COMPACT=0.1      # 池内紧凑性损失权重
+LAMBDA_COMPACT=0.05      # 池内紧凑性损失权重
 LAMBDA_SEPARATE=0.05    # 池间分离性损失权重
-SEPARATION_MARGIN=1.0   # 池间分离边际
+SEPARATION_MARGIN=0.1   # 池间分离边际
 
 # HCC参数
 HCC_WEIGHTS="0.5,0.5,1,1,1.5"

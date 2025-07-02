@@ -310,10 +310,10 @@ class CovarianceDynamicFeaturePool:
     def compute_inter_pool_separation_loss(self, margin: float = 1.0) -> torch.Tensor:
         """计算池间分离性损失 (Inter-Pool Separation Loss)
         
-        公式: L_separate = sum_{i=1}^{num_dfp} sum_{j=i+1}^{num_dfp} max(0, m - ||μ_i - μ_j||_2^2)
+        修改后的公式: L_separate = sum_{i=1}^{num_dfp} sum_{j=i+1}^{num_dfp} max(0, margin - ||μ_i - μ_j||_2)
         
         Args:
-            margin: 分离边际 m，默认为1.0
+            margin: 分离边际 m，建议使用较小的值如0.1-0.5
         
         Returns:
             separation_loss: 标量张量
@@ -336,6 +336,12 @@ class CovarianceDynamicFeaturePool:
                 center = torch.zeros(self.feature_dim, device=self.device)
                 current_centers.append(center)
         
+        # 如果有效的DFP少于2个，无法计算分离损失
+        valid_dfps = sum(1 for i in range(self.num_dfp) 
+                        if self.dfps[i] is not None and self.dfps[i].shape[0] > 0)
+        if valid_dfps < 2:
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        
         # 计算所有池对之间的分离损失
         for i in range(self.num_dfp):
             for j in range(i + 1, self.num_dfp):
@@ -346,18 +352,22 @@ class CovarianceDynamicFeaturePool:
                     center_i = current_centers[i]  # [D]
                     center_j = current_centers[j]  # [D]
                     
-                    # 计算两个DFP中心之间的L2距离的平方
-                    distance_squared = torch.sum((center_i - center_j) ** 2)
+                    # 计算两个DFP中心之间的L2距离（而不是距离平方）
+                    distance = torch.norm(center_i - center_j, p=2) + 1e-8  # 加小常数避免除零
                     
-                    # 使用hinge loss: max(0, margin - distance_squared)
-                    separation_loss = torch.relu(margin - distance_squared)
+                    # 修改后的hinge loss: max(0, margin - distance)
+                    # 当distance >= margin时，损失为0
+                    # 当distance < margin时，损失为margin - distance，鼓励增大距离
+                    separation_loss = torch.relu(margin - distance)
                     
                     total_loss = total_loss + separation_loss
                     num_pairs += 1
         
-        # 返回平均损失
+        # 返回平均损失，并进行归一化以提高数值稳定性
         if num_pairs > 0:
-            return total_loss / num_pairs
+            avg_loss = total_loss / num_pairs
+            # 对损失进行归一化，避免过大的梯度
+            return torch.tanh(avg_loss)  # 使用tanh将损失限制在[0,1]范围内
         else:
             return torch.tensor(0.0, device=self.device, requires_grad=True)
     

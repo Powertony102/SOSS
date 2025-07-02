@@ -76,7 +76,7 @@ parser.add_argument('--embedding_dim', type=int, default=64, help='embedding dim
 # 度量学习参数（新增）
 parser.add_argument('--lambda_compact', type=float, default=0.1, help='weight for intra-pool compactness loss')
 parser.add_argument('--lambda_separate', type=float, default=0.05, help='weight for inter-pool separation loss')
-parser.add_argument('--separation_margin', type=float, default=1.0, help='margin for inter-pool separation loss')
+parser.add_argument('--separation_margin', type=float, default=0.2, help='margin for inter-pool separation loss (recommended: 0.1-0.5)')
 
 # 其他参数
 parser.add_argument('--use_wandb', action='store_true', help='use wandb for logging')
@@ -340,9 +340,9 @@ def train_stage_three_main(model, sampled_batch, optimizer, consistency_criterio
                                 metric=args.hcc_metric,
                                 scale=args.hcc_scale)
 
-    # 度量学习损失 (新增)
-    loss_compact = torch.tensor(0.0, device=device, requires_grad=True)
-    loss_separate = torch.tensor(0.0, device=device, requires_grad=True)
+    # 度量学习损失 (新增) - 修复初始化问题
+    loss_compact = torch.tensor(0.0, device=device)
+    loss_separate = torch.tensor(0.0, device=device)
     
     if args.use_dfp and cov_dfp is not None and cov_dfp.dfps_built:
         # 获取区域特征用于度量学习损失计算
