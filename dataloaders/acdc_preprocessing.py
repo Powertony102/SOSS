@@ -9,8 +9,13 @@ import glob
 import h5py
 import numpy as np
 import SimpleITK as sitk
+import warnings
 from tqdm import tqdm
 import argparse
+
+# 过滤SimpleITK的sform警告
+warnings.filterwarnings("ignore", message=".*has unexpected scales in sform.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="SimpleITK")
 
 def process_acdc_data(data_root, output_dir, split='training'):
     """
