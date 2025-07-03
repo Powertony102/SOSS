@@ -44,7 +44,7 @@ snapshot_path = "./model/LA_{}_{}_dfp{}_memory{}_feat{}_compact{}_separate{}_lab
     FLAGS.lambda_compact,
     FLAGS.lambda_separate,
     FLAGS.num_filtered,
-    FLAGS.consistency,
+    int(FLAGS.consistency) if FLAGS.consistency == int(FLAGS.consistency) else FLAGS.consistency,
     FLAGS.consistency_rampup,
     FLAGS.consistency_o,
     FLAGS.max_iteration,
