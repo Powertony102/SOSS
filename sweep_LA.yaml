@@ -2,6 +2,8 @@ command:
   - python
   - train_cov_dfp_3d.py
   - --use_wandb
+  - --use_dfp
+  - --gpu 1
   - ${args}
 method: random
 metric:
@@ -28,7 +30,7 @@ parameters:
     min: 0.05
     max: 0.2
   dfp_start_iter:
-    values: [1000, 2000]
+    values: [1000, 2000, 3000, 4000, 5000]
   selector_train_iter:
     values: [50, 100, 150]
   dfp_reconstruct_interval:
