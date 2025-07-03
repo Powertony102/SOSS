@@ -5,7 +5,7 @@ metric:
   goal: maximize
 parameters:
   use_wandb:
-    value: true
+    flag: true
   base_lr:
     min: 0.001
     max: 0.02
