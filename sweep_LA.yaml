@@ -4,6 +4,8 @@ metric:
   name: val/dice
   goal: maximize
 parameters:
+  use_wandb:
+    value: true
   base_lr:
     min: 0.001
     max: 0.02
