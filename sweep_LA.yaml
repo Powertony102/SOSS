@@ -14,7 +14,7 @@ parameters:
   embedding_dim:
     values: [64, 128, 256]
   num_dfp:
-    values: [4, 6, 8, 16]
+    values: [4, 6, 8]
   seed:
     values: [1337, 42, 3407]
   consistency:
@@ -24,7 +24,7 @@ parameters:
     min: 0.05
     max: 0.2
   dfp_start_iter:
-    values: [1000, 2000, 3000]
+    values: [1000, 2000]
   selector_train_iter:
     values: [50, 100, 150]
   dfp_reconstruct_interval:
@@ -33,11 +33,9 @@ parameters:
     values: [20000, 50000, 100000]
   separation_margin:
     min: 0.5
-    max: 2.0
+    max: 1.5
   patch_size:
     values: [2, 4, 8]
-  hcc_patch_strategy:
-    values: ["mean_cov", "mean_loss", "max_loss", "topk"]
   hcc_metric:
     values: ["fro"]
   hcc_scale:
@@ -47,11 +45,11 @@ parameters:
     min: 0.3
     max: 0.7
   labeled_bs:
-    values: [1, 2, 4]
+    values: [2]
   batch_size:
-    values: [2, 4, 8]
+    values: [4]
   labelnum:
-    values: [2, 4, 8]
+    values: [4]
   consistency_rampup:
     min: 20.0
     max: 60.0
