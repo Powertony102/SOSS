@@ -1,11 +1,13 @@
-program: train_cov_dfp_3d.py
+command:
+  - python
+  - train_cov_dfp_3d.py
+  - --use_wandb
+  - ${args}
 method: random
 metric:
   name: val/dice
   goal: maximize
 parameters:
-  use_wandb:
-    flag: true
   base_lr:
     min: 0.001
     max: 0.02
