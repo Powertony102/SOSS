@@ -20,7 +20,7 @@ from torchvision import transforms
 
 from myutils import ramps, losses, test_patch
 from myutils.dynamic_feature_pool import DynamicFeaturePool
-from myutils.prototype_manager import PrototypeManager
+from myutils.contrastive_prototype_manager import ContrastivePrototypeManager
 from dataloaders.dataset import *
 from networks.net_factory import net_factory
 
@@ -67,15 +67,15 @@ parser.add_argument('--embedding_dim', type=int, default=64, help='embedding dim
 parser.add_argument('--memory_num', type=int, default=256, help='num of embeddings per class in memory bank')
 parser.add_argument('--num_filtered', type=int, default=12800, help='num of unlabeled embeddings to calculate similarity')
 
-# 原型分离参数
-parser.add_argument('--use_prototype', action='store_true', help='whether to use prototype separation')
+# 对比学习原型参数
+parser.add_argument('--use_prototype', action='store_true', help='whether to use contrastive prototype separation')
 parser.add_argument('--prototype_confidence_threshold', type=float, default=0.8, help='confidence threshold for prototype selection')
-parser.add_argument('--prototype_k', type=int, default=10, help='number of candidate prototypes per class')
-parser.add_argument('--prototype_update_momentum', type=float, default=0.9, help='momentum for prototype update')
-parser.add_argument('--prototype_intra_weight', type=float, default=1.0, help='weight for intra-class loss')
+parser.add_argument('--prototype_elements_per_class', type=int, default=32, help='number of feature elements per class in memory')
+parser.add_argument('--prototype_contrastive_weight', type=float, default=1.0, help='weight for contrastive learning loss')
+parser.add_argument('--prototype_intra_weight', type=float, default=0.1, help='weight for intra-class loss')
 parser.add_argument('--prototype_inter_weight', type=float, default=0.1, help='weight for inter-class loss')
 parser.add_argument('--prototype_margin', type=float, default=1.0, help='margin for inter-class separation')
-parser.add_argument('--prototype_update_freq', type=int, default=1, help='frequency of prototype update (every N iterations)')
+parser.add_argument('--prototype_use_learned_selector', action='store_true', help='whether to use learned feature selector')
 
 # 其他参数
 parser.add_argument('--use_wandb', action='store_true', help='use wandb for logging')
@@ -85,7 +85,7 @@ parser.add_argument('--deterministic', type=int, default=1, help='whether use de
 
 args = parser.parse_args()
 
-snapshot_path = "./model/LA_{}_{}_{}_memory{}_feat{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}".format(
+snapshot_path = "./model/LA_{}_{}_{}_memory{}_feat{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_proto{}_iter_{}_seed_{}".format(
     args.exp,
     args.labelnum,
     args.model,
@@ -95,6 +95,7 @@ snapshot_path = "./model/LA_{}_{}_{}_memory{}_feat{}_labeled_numfiltered_{}_cons
     args.consistency,
     args.consistency_rampup,
     args.consistency_o,
+    "contrastive" if args.use_prototype else "none",
     args.max_iteration,
     args.seed)
 
@@ -208,7 +209,7 @@ def compute_anchor_loss(features_list, labels_list, anchor_tensors, device):
         return torch.tensor(0.0, device=device)
 
 def train_with_dfp(model, sampled_batch, optimizer, consistency_criterion, dice_loss, 
-                   dfp, iter_num, prototype_manager=None, writer=None):
+                   dfp, iter_num, prototype_manager=None, selector_optimizer=None, writer=None):
     """使用DFP的训练函数"""
     model.train()
     volume_batch, label_batch, idx = sampled_batch['image'], sampled_batch['label'], sampled_batch['idx']
@@ -258,22 +259,24 @@ def train_with_dfp(model, sampled_batch, optimizer, consistency_criterion, dice_
         # 计算anchor损失
         loss_anchor = compute_anchor_loss(features_list, labels_list, anchor_tensors, device)
     
-    # 原型分离损失
+    # 对比学习原型损失
     loss_prototype = torch.tensor(0.0, device=device)
     prototype_info = {}
     if args.use_prototype and prototype_manager is not None:
         # 重用已经计算的特征
         features_combined = (embedding_v + embedding_a) / 2  # [batch_size, feature_dim, H, W, D]
+        outputs_combined = (outputs_v + outputs_a) / 2  # [batch_size, num_classes, H, W, D]
         
-        # 标记数据的原型分离损失
+        # 标记数据的对比学习原型损失
         if labeled_bs > 0:
             labeled_features = features_combined[:labeled_bs]
-            labeled_outputs = (outputs_v[:labeled_bs] + outputs_a[:labeled_bs]) / 2
+            labeled_outputs = outputs_combined[:labeled_bs]
             labeled_labels = label_batch[:labeled_bs]
             
             loss_prototype_labeled, loss_dict_labeled = prototype_manager.update_and_compute_loss(
                 labeled_features, labeled_outputs, labeled_labels, 
                 is_labeled=True,
+                contrastive_weight=args.prototype_contrastive_weight,
                 intra_weight=args.prototype_intra_weight,
                 inter_weight=args.prototype_inter_weight,
                 margin=args.prototype_margin
@@ -281,14 +284,16 @@ def train_with_dfp(model, sampled_batch, optimizer, consistency_criterion, dice_
             loss_prototype += loss_prototype_labeled
             prototype_info.update({k + '_labeled': v for k, v in loss_dict_labeled.items()})
         
-        # 无标记数据的原型分离损失
+        # 无标记数据的对比学习原型损失
         if len(features_combined) > labeled_bs:
             unlabeled_features = features_combined[labeled_bs:]
-            unlabeled_outputs = (outputs_v[labeled_bs:] + outputs_a[labeled_bs:]) / 2
+            unlabeled_outputs = outputs_combined[labeled_bs:]
             
-            loss_prototype_unlabeled, loss_dict_unlabeled = prototype_manager.compute_prototype_loss(
+            loss_prototype_unlabeled, loss_dict_unlabeled = prototype_manager.update_and_compute_loss(
                 unlabeled_features, unlabeled_outputs, 
+                labels=None,
                 is_labeled=False,
+                contrastive_weight=args.prototype_contrastive_weight,
                 intra_weight=args.prototype_intra_weight,
                 inter_weight=args.prototype_inter_weight,
                 margin=args.prototype_margin
@@ -299,14 +304,20 @@ def train_with_dfp(model, sampled_batch, optimizer, consistency_criterion, dice_
     # 计算总损失
     lambda_c = get_lambda_c(iter_num // 150)
     lambda_d = get_lambda_d(iter_num // 150)
-    lambda_p = args.prototype_intra_weight if args.use_prototype else 0.0
+    lambda_p = args.prototype_contrastive_weight if args.use_prototype else 0.0
     
     total_loss = args.lamda * loss_s + lambda_c * loss_c + lambda_d * loss_anchor + lambda_p * loss_prototype
 
     # 反向传播
     optimizer.zero_grad()
+    if selector_optimizer is not None:
+        selector_optimizer.zero_grad()
+    
     total_loss.backward()
+    
     optimizer.step()
+    if selector_optimizer is not None:
+        selector_optimizer.step()
 
     # 记录日志
     if args.use_prototype:
@@ -335,7 +346,7 @@ def train_with_dfp(model, sampled_batch, optimizer, consistency_criterion, dice_
     return result
 
 def train_without_dfp(model, sampled_batch, optimizer, consistency_criterion, dice_loss, 
-                      iter_num, prototype_manager=None, writer=None):
+                      iter_num, prototype_manager=None, selector_optimizer=None, writer=None):
     """不使用DFP的标准训练函数"""
     model.train()
     volume_batch, label_batch, idx = sampled_batch['image'], sampled_batch['label'], sampled_batch['idx']
@@ -370,22 +381,24 @@ def train_without_dfp(model, sampled_batch, optimizer, consistency_criterion, di
             if i != j:
                 loss_c += consistency_criterion(y_ori[i], y_pseudo_label[j])
 
-    # 原型分离损失
+    # 对比学习原型损失
     loss_prototype = torch.tensor(0.0, device=device)
     prototype_info = {}
     if args.use_prototype and prototype_manager is not None:
         # 重用已经计算的特征
         features_combined = (embedding_v + embedding_a) / 2  # [batch_size, feature_dim, H, W, D]
+        outputs_combined = (outputs_v + outputs_a) / 2  # [batch_size, num_classes, H, W, D]
         
-        # 标记数据的原型分离损失
+        # 标记数据的对比学习原型损失
         if labeled_bs > 0:
             labeled_features = features_combined[:labeled_bs]
-            labeled_outputs = (outputs_v[:labeled_bs] + outputs_a[:labeled_bs]) / 2
+            labeled_outputs = outputs_combined[:labeled_bs]
             labeled_labels = label_batch[:labeled_bs]
             
             loss_prototype_labeled, loss_dict_labeled = prototype_manager.update_and_compute_loss(
                 labeled_features, labeled_outputs, labeled_labels, 
                 is_labeled=True,
+                contrastive_weight=args.prototype_contrastive_weight,
                 intra_weight=args.prototype_intra_weight,
                 inter_weight=args.prototype_inter_weight,
                 margin=args.prototype_margin
@@ -393,14 +406,16 @@ def train_without_dfp(model, sampled_batch, optimizer, consistency_criterion, di
             loss_prototype += loss_prototype_labeled
             prototype_info.update({k + '_labeled': v for k, v in loss_dict_labeled.items()})
         
-        # 无标记数据的原型分离损失
+        # 无标记数据的对比学习原型损失
         if len(features_combined) > labeled_bs:
             unlabeled_features = features_combined[labeled_bs:]
-            unlabeled_outputs = (outputs_v[labeled_bs:] + outputs_a[labeled_bs:]) / 2
+            unlabeled_outputs = outputs_combined[labeled_bs:]
             
-            loss_prototype_unlabeled, loss_dict_unlabeled = prototype_manager.compute_prototype_loss(
+            loss_prototype_unlabeled, loss_dict_unlabeled = prototype_manager.update_and_compute_loss(
                 unlabeled_features, unlabeled_outputs, 
+                labels=None,
                 is_labeled=False,
+                contrastive_weight=args.prototype_contrastive_weight,
                 intra_weight=args.prototype_intra_weight,
                 inter_weight=args.prototype_inter_weight,
                 margin=args.prototype_margin
@@ -410,14 +425,20 @@ def train_without_dfp(model, sampled_batch, optimizer, consistency_criterion, di
 
     # 计算总损失
     lambda_c = get_lambda_c(iter_num // 150)
-    lambda_p = args.prototype_intra_weight if args.use_prototype else 0.0
+    lambda_p = args.prototype_contrastive_weight if args.use_prototype else 0.0
     
     total_loss = args.lamda * loss_s + lambda_c * loss_c + lambda_p * loss_prototype
 
     # 反向传播
     optimizer.zero_grad()
+    if selector_optimizer is not None:
+        selector_optimizer.zero_grad()
+    
     total_loss.backward()
+    
     optimizer.step()
+    if selector_optimizer is not None:
+        selector_optimizer.step()
 
     # 记录日志
     if args.use_prototype:
@@ -457,12 +478,13 @@ if __name__ == "__main__":
 
     # 初始化wandb
     if args.use_wandb:
+        proto_tag = "contrastive" if args.use_prototype else "none"
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
             config=vars(args),
-            name=f"{args.exp}_{args.model}_feat{args.embedding_dim}_dfp{args.use_dfp}",
-            tags=[args.dataset_name, "corn_dfp", f"feat_{args.embedding_dim}"]
+            name=f"{args.exp}_{args.model}_feat{args.embedding_dim}_dfp{args.use_dfp}_proto{proto_tag}",
+            tags=[args.dataset_name, "corn_dfp", f"feat_{args.embedding_dim}", f"proto_{proto_tag}"]
         )
         logging.info(f"Wandb initialized with project: {args.wandb_project}")
 
@@ -490,20 +512,21 @@ if __name__ == "__main__":
         )
         logging.info(f"DynamicFeaturePool created on {device} with max_store={args.max_store}, ema_alpha={args.ema_alpha}")
     
-    # 创建原型管理器
+    # 创建对比学习原型管理器
     prototype_manager = None
     if args.use_prototype:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        prototype_manager = PrototypeManager(
+        prototype_manager = ContrastivePrototypeManager(
             num_classes=num_classes,
             feature_dim=args.embedding_dim,
-            k_prototypes=args.prototype_k,
+            elements_per_class=args.prototype_elements_per_class,
             confidence_threshold=args.prototype_confidence_threshold,
-            update_momentum=args.prototype_update_momentum,
+            use_learned_selector=args.prototype_use_learned_selector,
             device=device
         )
-        logging.info(f"PrototypeManager created on {device} with k_prototypes={args.prototype_k}, confidence_threshold={args.prototype_confidence_threshold}")
-        logging.info(f"Prototype weights: intra={args.prototype_intra_weight}, inter={args.prototype_inter_weight}, margin={args.prototype_margin}")
+        logging.info(f"ContrastivePrototypeManager created on {device} with elements_per_class={args.prototype_elements_per_class}, confidence_threshold={args.prototype_confidence_threshold}")
+        logging.info(f"Prototype weights: contrastive={args.prototype_contrastive_weight}, intra={args.prototype_intra_weight}, inter={args.prototype_inter_weight}, margin={args.prototype_margin}")
+        logging.info(f"Use learned selector: {args.prototype_use_learned_selector}")
 
     # 创建数据加载器
     if args.dataset_name == "LA":
@@ -529,6 +552,20 @@ if __name__ == "__main__":
 
     # 创建优化器
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
+    
+    # 如果使用学习的选择器，为其创建额外的优化器
+    selector_optimizer = None
+    if args.use_prototype and args.prototype_use_learned_selector and prototype_manager is not None:
+        feature_selectors, memory_selectors = prototype_manager.get_selectors()
+        selector_params = []
+        if feature_selectors is not None:
+            selector_params.extend(feature_selectors.parameters())
+        if memory_selectors is not None:
+            selector_params.extend(memory_selectors.parameters())
+        
+        if len(selector_params) > 0:
+            selector_optimizer = optim.Adam(selector_params, lr=base_lr * 0.1)
+            logging.info(f"Created selector optimizer with {len(selector_params)} parameter groups")
 
     # 初始化tensorboard writer
     writer = SummaryWriter(snapshot_path + '/log') if not args.use_wandb else None
@@ -551,14 +588,20 @@ if __name__ == "__main__":
                 lr_ = base_lr * 0.1 ** (iter_num // 2500)
                 for param_group in optimizer.param_groups:
                     param_group['lr'] = lr_
+                
+                # 调整选择器优化器的学习率
+                if selector_optimizer is not None:
+                    selector_lr = lr_ * 0.1  # 选择器使用更小的学习率
+                    for param_group in selector_optimizer.param_groups:
+                        param_group['lr'] = selector_lr
             
             # 训练
             if args.use_dfp:
                 metrics = train_with_dfp(model, sampled_batch, optimizer, consistency_criterion, 
-                                       dice_loss, dfp, iter_num, prototype_manager, writer)
+                                       dice_loss, dfp, iter_num, prototype_manager, selector_optimizer, writer)
             else:
                 metrics = train_without_dfp(model, sampled_batch, optimizer, consistency_criterion, 
-                                          dice_loss, iter_num, prototype_manager, writer)
+                                          dice_loss, iter_num, prototype_manager, selector_optimizer, writer)
             
             # 记录指标
             if args.use_wandb:
