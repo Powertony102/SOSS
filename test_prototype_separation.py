@@ -131,23 +131,28 @@ def example_usage():
     for epoch in range(3):
         print(f"\nEpoch {epoch + 1}:")
 
+        # 1. 用 no_grad + 新的 features 更新原型
+        with torch.no_grad():
+            decoder_features_ng = torch.randn(batch_size, feat_dim, H, W, D, device=device)
+            segmentation_logits_ng = torch.randn(batch_size, num_classes + 1, H, W, D, device=device)
+            predictions_ng = torch.softmax(segmentation_logits_ng, dim=1)
+            ground_truth_ng = torch.randint(0, num_classes + 1, (batch_size, 1, H, W, D), device=device)
+            is_labelled_ng = torch.tensor([True, True, False, False], device=device)
+            _ = proto_mem(
+                feat=decoder_features_ng,
+                label=ground_truth_ng,
+                pred=predictions_ng,
+                is_labelled=is_labelled_ng,
+                epoch_idx=epoch
+            )
+
+        # 2. 用全新 features 做 loss 反向传播
         decoder_features = torch.randn(batch_size, feat_dim, H, W, D, device=device, requires_grad=True)
         segmentation_logits = torch.randn(batch_size, num_classes + 1, H, W, D, device=device)
         predictions = torch.softmax(segmentation_logits, dim=1)
         ground_truth = torch.randint(0, num_classes + 1, (batch_size, 1, H, W, D), device=device)
         is_labelled = torch.tensor([True, True, False, False], device=device)
 
-        # 1. 先用 no_grad 更新原型（不参与 autograd 图）
-        with torch.no_grad():
-            _ = proto_mem(
-                feat=decoder_features.detach(),  # detach防止污染
-                label=ground_truth,
-                pred=predictions,
-                is_labelled=is_labelled,
-                epoch_idx=epoch
-            )
-
-        # 2. 用全新 forward 只做 loss 计算（不更新原型，不污染 buffer）
         proto_losses = proto_mem(
             feat=decoder_features,
             label=ground_truth,
