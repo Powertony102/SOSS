@@ -21,7 +21,6 @@ from torchvision import transforms
 
 from myutils import ramps, losses, test_patch
 from myutils.cov_dynamic_feature_pool import CovarianceDynamicFeaturePool
-from myutils.hcc_loss import hierarchical_coral, parse_hcc_weights
 from dataloaders.dataset import *
 from networks.net_factory import net_factory
 
@@ -106,7 +105,7 @@ parser.add_argument('--deterministic', type=int, default=1, help='whether use de
 args = parser.parse_args()
 
 # Parse HCC weights
-hcc_weights = parse_hcc_weights(args.hcc_weights, num_layers=5)
+# hcc_weights = parse_hcc_weights(args.hcc_weights, num_layers=5)
 
 snapshot_path = "./model/LA_{}_{}_dfp{}_memory{}_feat{}_compact{}_separate{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}".format(
     args.exp,
@@ -179,16 +178,16 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
                 loss_c += consistency_criterion(y_ori[i], y_pseudo_label[j])
 
     # HCC Loss
-    loss_hcc = hierarchical_coral(features_v, features_a, hcc_weights,
-                                cov_mode=args.cov_mode, 
-                                patch_size=args.patch_size,
-                                patch_strategy=args.hcc_patch_strategy,
-                                topk=args.hcc_topk,
-                                metric=args.hcc_metric,
-                                scale=args.hcc_scale)
+    # loss_hcc = hierarchical_coral(features_v, features_a, hcc_weights,
+    #                             cov_mode=args.cov_mode, 
+    #                             patch_size=args.patch_size,
+    #                             patch_strategy=args.hcc_patch_strategy,
+    #                             topk=args.hcc_topk,
+    #                             metric=args.hcc_metric,
+    #                             scale=args.hcc_scale)
 
     lambda_c = get_lambda_c(iter_num // 150)
-    total_loss = args.lamda * loss_s + lambda_c * loss_c + args.lambda_hcc * loss_hcc
+    total_loss = args.lamda * loss_s + lambda_c * loss_c
 
     # 添加特征到全局池（包含标签信息用于Two-Phase k-means）
     if args.use_dfp and cov_dfp is not None:
@@ -239,14 +238,13 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
     optimizer.step()
 
     # 记录日志
-    logging.info('Stage 1 - Iteration %d : loss : %03f, loss_s: %03f, loss_c: %03f, loss_hcc: %03f' % (
-        iter_num, total_loss, loss_s, loss_c, loss_hcc))
+    logging.info('Stage 1 - Iteration %d : loss : %03f, loss_s: %03f, loss_c: %03f' % (
+        iter_num, total_loss, loss_s, loss_c))
     
     return {
         'total_loss': total_loss.item(),
         'loss_s': loss_s.item(),
         'loss_c': loss_c.item(),
-        'loss_hcc': loss_hcc.item(),
         'lambda_c': lambda_c
     }
 
@@ -362,13 +360,13 @@ def train_stage_three_main(model, sampled_batch, optimizer, consistency_criterio
                 loss_c += consistency_criterion(y_ori[i], y_pseudo_label[j])
 
     # HCC Loss
-    loss_hcc = hierarchical_coral(features_v, features_a, hcc_weights,
-                                cov_mode=args.cov_mode, 
-                                patch_size=args.patch_size,
-                                patch_strategy=args.hcc_patch_strategy,
-                                topk=args.hcc_topk,
-                                metric=args.hcc_metric,
-                                scale=args.hcc_scale)
+    # loss_hcc = hierarchical_coral(features_v, features_a, hcc_weights,
+    #                             cov_mode=args.cov_mode, 
+    #                             patch_size=args.patch_size,
+    #                             patch_strategy=args.hcc_patch_strategy,
+    #                             topk=args.hcc_topk,
+    #                             metric=args.hcc_metric,
+    #                             scale=args.hcc_scale)
 
     # 度量学习损失 (新增) - 修复初始化问题
     loss_compact = torch.tensor(0.0, device=device)
@@ -556,7 +554,6 @@ if __name__ == "__main__":
                         'train/loss': metrics['total_loss'],
                         'train/loss_supervised': metrics['loss_s'],
                         'train/loss_consistency': metrics['loss_c'],
-                        'train/loss_hcc': metrics['loss_hcc'],
                         'train/lambda_c': metrics['lambda_c'],
                         'iteration': iter_num
                     })
@@ -667,7 +664,6 @@ if __name__ == "__main__":
                             'train/loss': metrics['total_loss'],
                             'train/loss_supervised': metrics['loss_s'],
                             'train/loss_consistency': metrics['loss_c'],
-                            'train/loss_hcc': metrics['loss_hcc'],
                             'train/loss_compact': metrics['loss_compact'],
                             'train/loss_separate': metrics['loss_separate'],
                             'train/lambda_compact': args.lambda_compact,
@@ -686,7 +682,6 @@ if __name__ == "__main__":
                         'train/loss': metrics['total_loss'],
                         'train/loss_supervised': metrics['loss_s'],
                         'train/loss_consistency': metrics['loss_c'],
-                        'train/loss_hcc': metrics['loss_hcc'],
                         'iteration': iter_num
                     })
 
