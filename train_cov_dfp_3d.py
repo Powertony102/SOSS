@@ -168,13 +168,26 @@ if __name__ == "__main__":
             volume_batch, label_batch, idx = sampled_batch['image'], sampled_batch['label'], sampled_batch['idx']
             volume_batch, label_batch = volume_batch.cuda(), label_batch.cuda()
             outputs, embedding = model(volume_batch)
-            # 只用有标签部分
-            labeled_features = embedding[:args.labeled_bs, ...]
-            labeled_labels = label_batch[:args.labeled_bs, ...]
-            labeled_features = labeled_features.permute(0, 2, 3, 4, 1).contiguous().view(-1, embedding.shape[1])
-            labeled_labels = labeled_labels.view(-1)
+            
+            # 处理有标签部分的特征和标签
+            labeled_features = embedding[:args.labeled_bs]  # (B, C, H, W, D)
+            labeled_labels = label_batch[:args.labeled_bs]  # (B, 1, H, W, D)
+            
+            # 将特征转换为二维张量 (N, C)
+            B, C, H, W, D = labeled_features.shape
+            labeled_features = labeled_features.permute(0, 2, 3, 4, 1).reshape(-1, C)
+            
+            # 将标签转换为一维向量 (N,)，确保去除channel维
+            labeled_labels = labeled_labels.squeeze(1).reshape(-1)
+            
+            # 确保在同一设备上
+            labeled_features = labeled_features.to(embedding.device)
+            labeled_labels = labeled_labels.to(embedding.device)
+            
+            # 更新特征池
             feature_pool.add_to_global_pool(labeled_features, labeled_labels)
-            # 损失与优化
+            
+            # 计算分割损失
             # 以outputs为二分类输出，取前labeled_bs个batch
             y = outputs[:args.labeled_bs, ...]
             y_prob = torch.softmax(y, dim=1)
