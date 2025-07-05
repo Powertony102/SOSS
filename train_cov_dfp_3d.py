@@ -21,6 +21,7 @@ from torchvision import transforms
 
 from myutils import ramps, losses, test_patch
 from myutils.cov_dynamic_feature_pool import CovarianceDynamicFeaturePool
+from myutils.prototype_separation import PrototypeMemory  # 新增：导入原型分离模块
 from dataloaders.dataset import *
 from networks.net_factory import net_factory
 
@@ -83,6 +84,16 @@ parser.add_argument('--lambda_compact', type=float, default=0.1, help='weight fo
 parser.add_argument('--lambda_separate', type=float, default=0.05, help='weight for inter-pool separation loss')
 parser.add_argument('--separation_margin', type=float, default=1.0, help='margin for inter-pool separation loss with Softplus (recommended: 0.5-2.0 for distance squared)')
 
+# 原型分离参数（新增）
+parser.add_argument('--use_prototype_separation', action='store_true', help='whether to use prototype separation module')
+parser.add_argument('--lambda_prototype', type=float, default=0.3, help='weight for prototype separation loss')
+parser.add_argument('--proto_momentum', type=float, default=0.95, help='momentum for prototype updates')
+parser.add_argument('--proto_conf_thresh', type=float, default=0.85, help='confidence threshold for prototype updates')
+parser.add_argument('--proto_lambda_intra', type=float, default=0.3, help='weight for intra-class compactness in prototype loss')
+parser.add_argument('--proto_lambda_inter', type=float, default=0.1, help='weight for inter-class separation in prototype loss')
+parser.add_argument('--proto_margin', type=float, default=1.5, help='margin for inter-class separation in prototype loss')
+parser.add_argument('--proto_update_interval', type=int, default=5, help='interval for prototype updates (in batches)')
+
 # 其他参数
 parser.add_argument('--use_wandb', action='store_true', help='use wandb for logging')
 parser.add_argument('--wandb_project', type=str, default='Cov-DFP', help='wandb project name')
@@ -107,7 +118,7 @@ args = parser.parse_args()
 # Parse HCC weights
 # hcc_weights = parse_hcc_weights(args.hcc_weights, num_layers=5)
 
-snapshot_path = "./model/LA_{}_{}_dfp{}_memory{}_feat{}_compact{}_separate{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}".format(
+snapshot_path = "./model/LA_{}_{}_dfp{}_memory{}_feat{}_compact{}_separate{}_proto{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}".format(
     args.exp,
     args.labelnum,
     args.num_dfp,
@@ -115,6 +126,7 @@ snapshot_path = "./model/LA_{}_{}_dfp{}_memory{}_feat{}_compact{}_separate{}_lab
     args.embedding_dim,
     args.lambda_compact,
     args.lambda_separate,
+    args.lambda_prototype if args.use_prototype_separation else 0,
     args.num_filtered,
     args.consistency,
     args.consistency_rampup,
@@ -142,10 +154,10 @@ if args.deterministic:
     np.random.seed(args.seed)
 
 def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice_loss, 
-                   cov_dfp, iter_num, writer=None):
+                   cov_dfp, proto_memory, iter_num, writer=None):
     """阶段一：初始预训练
     
-    目标：训练初步的主模型，建立全局特征池
+    目标：训练初步的主模型，建立全局特征池，初始化原型
     """
     model.train()
     volume_batch, label_batch, idx = sampled_batch['image'], sampled_batch['label'], sampled_batch['idx']
@@ -186,8 +198,37 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
     #                             metric=args.hcc_metric,
     #                             scale=args.hcc_scale)
 
+    # 原型分离损失（新增）
+    loss_proto_intra = torch.tensor(0.0, device=device)
+    loss_proto_inter = torch.tensor(0.0, device=device)
+    loss_proto_total = torch.tensor(0.0, device=device)
+    
+    if args.use_prototype_separation and proto_memory is not None:
+        # 使用embedding_v作为特征
+        decoder_features = embedding_v  # (B, C, H, W, D)
+        predictions = torch.softmax(outputs_v, dim=1)  # (B, K, H, W, D)
+        
+        # 创建is_labelled掩码
+        is_labelled = torch.zeros(volume_batch.shape[0], dtype=torch.bool, device=device)
+        is_labelled[:args.labeled_bs] = True
+        
+        # 计算原型损失（不更新原型，避免autograd图问题）
+        proto_losses = proto_memory(
+            feat=decoder_features,
+            label=label_batch,
+            pred=predictions,
+            is_labelled=is_labelled,
+            epoch_idx=None  # 关键：设为None避免原型更新时的梯度问题
+        )
+        
+        loss_proto_intra = proto_losses['intra']
+        loss_proto_inter = proto_losses['inter']
+        loss_proto_total = proto_losses['total']
+
     lambda_c = get_lambda_c(iter_num // 150)
-    total_loss = args.lamda * loss_s + lambda_c * loss_c
+    total_loss = (args.lamda * loss_s + 
+                  lambda_c * loss_c + 
+                  args.lambda_prototype * loss_proto_total)
 
     # 添加特征到全局池（包含标签信息用于Two-Phase k-means）
     if args.use_dfp and cov_dfp is not None:
@@ -237,14 +278,36 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
     total_loss.backward()
     optimizer.step()
 
+    # 原型更新 - 在optimizer.step()之后独立进行（新增）
+    if args.use_prototype_separation and proto_memory is not None and iter_num % args.proto_update_interval == 0:
+        with torch.no_grad():
+            # 创建无梯度的特征副本用于原型更新
+            update_features = embedding_v.detach().clone()
+            update_predictions = torch.softmax(outputs_v, dim=1).detach().clone()
+            
+            # 独立更新原型
+            _ = proto_memory(
+                feat=update_features,
+                label=label_batch,
+                pred=update_predictions,
+                is_labelled=is_labelled,
+                epoch_idx=iter_num // 150  # 使用epoch作为更新索引
+            )
+            
+            # 清理临时张量
+            del update_features, update_predictions
+
     # 记录日志
-    logging.info('Stage 1 - Iteration %d : loss : %03f, loss_s: %03f, loss_c: %03f' % (
-        iter_num, total_loss, loss_s, loss_c))
+    logging.info('Stage 1 - Iteration %d : loss : %03f, loss_s: %03f, loss_c: %03f, loss_proto: %03f' % (
+        iter_num, total_loss, loss_s, loss_c, loss_proto_total))
     
     return {
         'total_loss': total_loss.item(),
         'loss_s': loss_s.item(),
         'loss_c': loss_c.item(),
+        'loss_proto_intra': loss_proto_intra.item(),
+        'loss_proto_inter': loss_proto_inter.item(),
+        'loss_proto_total': loss_proto_total.item(),
         'lambda_c': lambda_c
     }
 
@@ -310,8 +373,8 @@ def train_stage_three_selector(model, sampled_batch, selector_optimizer, cov_dfp
     }
 
 def train_stage_three_main(model, sampled_batch, optimizer, consistency_criterion, dice_loss, 
-                          cov_dfp, iter_num, writer=None):
-    """阶段三B：主模型训练（使用Selector选择的DFP）"""
+                          cov_dfp, proto_memory, iter_num, writer=None):
+    """阶段三B：主模型训练（使用Selector选择的DFP + 原型分离）"""
     model.train()
     volume_batch, label_batch, idx = sampled_batch['image'], sampled_batch['label'], sampled_batch['idx']
     volume_batch, label_batch, idx = volume_batch.cuda(), label_batch.cuda(), idx.cuda()
@@ -367,6 +430,34 @@ def train_stage_three_main(model, sampled_batch, optimizer, consistency_criterio
     #                             topk=args.hcc_topk,
     #                             metric=args.hcc_metric,
     #                             scale=args.hcc_scale)
+    loss_hcc = torch.tensor(0.0, device=device)  # 临时设置为0
+
+    # 原型分离损失（新增）
+    loss_proto_intra = torch.tensor(0.0, device=device)
+    loss_proto_inter = torch.tensor(0.0, device=device)
+    loss_proto_total = torch.tensor(0.0, device=device)
+    
+    if args.use_prototype_separation and proto_memory is not None:
+        # 使用embedding_v作为特征
+        decoder_features = embedding_v  # (B, C, H, W, D)
+        predictions = torch.softmax(outputs_v, dim=1)  # (B, K, H, W, D)
+        
+        # 创建is_labelled掩码
+        is_labelled = torch.zeros(volume_batch.shape[0], dtype=torch.bool, device=device)
+        is_labelled[:args.labeled_bs] = True
+        
+        # 计算原型损失（不更新原型，避免autograd图问题）
+        proto_losses = proto_memory(
+            feat=decoder_features,
+            label=label_batch,
+            pred=predictions,
+            is_labelled=is_labelled,
+            epoch_idx=None  # 关键：设为None避免原型更新时的梯度问题
+        )
+        
+        loss_proto_intra = proto_losses['intra']
+        loss_proto_inter = proto_losses['inter']
+        loss_proto_total = proto_losses['total']
 
     # 度量学习损失 (新增) - 修复初始化问题
     loss_compact = torch.tensor(0.0, device=device)
@@ -409,20 +500,41 @@ def train_stage_three_main(model, sampled_batch, optimizer, consistency_criterio
                   lambda_c * loss_c + 
                   args.lambda_hcc * loss_hcc + 
                   args.lambda_compact * loss_compact + 
-                  args.lambda_separate * loss_separate)
+                  args.lambda_separate * loss_separate +
+                  args.lambda_prototype * loss_proto_total)
 
     optimizer.zero_grad()
     total_loss.backward()
     optimizer.step()
 
     # 在反向传播后更新DFPs
-    with torch.no_grad():
-        cov_dfp.update_dfps_with_batch_features(batch_features_by_dfp, 
-                                               update_rate=0.1, 
-                                               max_dfp_size=1000)
+    if args.use_dfp and cov_dfp is not None and cov_dfp.dfps_built:
+        with torch.no_grad():
+            cov_dfp.update_dfps_with_batch_features(batch_features_by_dfp, 
+                                                   update_rate=0.1, 
+                                                   max_dfp_size=1000)
 
-    logging.info('Stage 3B - Main training iter %d : loss : %03f, loss_s: %03f, loss_c: %03f, loss_hcc: %03f, loss_compact: %03f, loss_separate: %03f' % (
-        iter_num, total_loss, loss_s, loss_c, loss_hcc, loss_compact, loss_separate))
+    # 原型更新 - 在optimizer.step()之后独立进行（新增）
+    if args.use_prototype_separation and proto_memory is not None and iter_num % args.proto_update_interval == 0:
+        with torch.no_grad():
+            # 创建无梯度的特征副本用于原型更新
+            update_features = embedding_v.detach().clone()
+            update_predictions = torch.softmax(outputs_v, dim=1).detach().clone()
+            
+            # 独立更新原型
+            _ = proto_memory(
+                feat=update_features,
+                label=label_batch,
+                pred=update_predictions,
+                is_labelled=is_labelled,
+                epoch_idx=iter_num // 150  # 使用epoch作为更新索引
+            )
+            
+            # 清理临时张量
+            del update_features, update_predictions
+
+    logging.info('Stage 3B - Main training iter %d : loss : %03f, loss_s: %03f, loss_c: %03f, loss_hcc: %03f, loss_compact: %03f, loss_separate: %03f, loss_proto: %03f' % (
+        iter_num, total_loss, loss_s, loss_c, loss_hcc, loss_compact, loss_separate, loss_proto_total))
     
     return {
         'total_loss': total_loss.item(),
@@ -431,6 +543,9 @@ def train_stage_three_main(model, sampled_batch, optimizer, consistency_criterio
         'loss_hcc': loss_hcc.item(),
         'loss_compact': loss_compact.item(),
         'loss_separate': loss_separate.item(),
+        'loss_proto_intra': loss_proto_intra.item(),
+        'loss_proto_inter': loss_proto_inter.item(),
+        'loss_proto_total': loss_proto_total.item(),
         'lambda_c': lambda_c
     }
 
@@ -448,12 +563,16 @@ if __name__ == "__main__":
 
     # 初始化wandb
     if args.use_wandb:
+        wandb_tags = [args.dataset_name, "cov_dfp", f"dfp_{args.num_dfp}", "metric_learning"]
+        if args.use_prototype_separation:
+            wandb_tags.append("prototype_separation")
+        
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
             config=vars(args),
-            name=f"{args.exp}_{args.model}_dfp{args.num_dfp}_feat{args.embedding_dim}_compact{args.lambda_compact}_separate{args.lambda_separate}",
-            tags=[args.dataset_name, "cov_dfp", f"dfp_{args.num_dfp}", "metric_learning"]
+            name=f"{args.exp}_{args.model}_dfp{args.num_dfp}_feat{args.embedding_dim}_compact{args.lambda_compact}_separate{args.lambda_separate}_proto{args.lambda_prototype if args.use_prototype_separation else 0}",
+            tags=wandb_tags
         )
         logging.info(f"Wandb initialized with project: {args.wandb_project}")
 
@@ -487,6 +606,25 @@ if __name__ == "__main__":
         
         logging.info(f"CovarianceDynamicFeaturePool created on device: {device}")
         logging.info(f"Two-Phase k-means enabled with {num_classes} classes")
+
+    # 创建原型内存模块（新增）
+    proto_memory = None
+    if args.use_prototype_separation:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        proto_memory = PrototypeMemory(
+            num_classes=num_classes - 1,  # LA数据集：1个前景类（不包括背景）
+            feat_dim=args.embedding_dim,
+            proto_momentum=args.proto_momentum,
+            conf_thresh=args.proto_conf_thresh,
+            lambda_intra=args.proto_lambda_intra,
+            lambda_inter=args.proto_lambda_inter,
+            margin_m=args.proto_margin,
+            device=device
+        ).to(device)
+        
+        logging.info(f"PrototypeMemory created on device: {device}")
+        logging.info(f"Prototype config: momentum={args.proto_momentum}, conf_thresh={args.proto_conf_thresh}")
+        logging.info(f"Prototype losses: λ_intra={args.proto_lambda_intra}, λ_inter={args.proto_lambda_inter}, margin={args.proto_margin}")
 
     # 创建数据加载器
     if args.dataset_name == "LA":
@@ -545,7 +683,7 @@ if __name__ == "__main__":
             if iter_num < args.dfp_start_iter:
                 # 阶段一：初始预训练
                 metrics = train_stage_one(model, sampled_batch, optimizer, consistency_criterion, 
-                                        dice_loss, cov_dfp, iter_num, writer)
+                                        dice_loss, cov_dfp, proto_memory, iter_num, writer)
                 
                 # 记录指标
                 if args.use_wandb:
@@ -554,6 +692,9 @@ if __name__ == "__main__":
                         'train/loss': metrics['total_loss'],
                         'train/loss_supervised': metrics['loss_s'],
                         'train/loss_consistency': metrics['loss_c'],
+                        'train/loss_proto_intra': metrics['loss_proto_intra'],
+                        'train/loss_proto_inter': metrics['loss_proto_inter'],
+                        'train/loss_proto_total': metrics['loss_proto_total'],
                         'train/lambda_c': metrics['lambda_c'],
                         'iteration': iter_num
                     })
@@ -655,7 +796,7 @@ if __name__ == "__main__":
                     # 阶段3B：使用训练好的selector进行主模型训练
                     logging.info(f"Stage 3B - Training Main Model with trained selector")
                     metrics = train_stage_three_main(model, sampled_batch, optimizer, consistency_criterion, 
-                                                   dice_loss, cov_dfp, iter_num, writer)
+                                                   dice_loss, cov_dfp, proto_memory, iter_num, writer)
                     
                     if args.use_wandb:
                         wandb.log({
@@ -666,8 +807,12 @@ if __name__ == "__main__":
                             'train/loss_consistency': metrics['loss_c'],
                             'train/loss_compact': metrics['loss_compact'],
                             'train/loss_separate': metrics['loss_separate'],
+                            'train/loss_proto_intra': metrics['loss_proto_intra'],
+                            'train/loss_proto_inter': metrics['loss_proto_inter'],
+                            'train/loss_proto_total': metrics['loss_proto_total'],
                             'train/lambda_compact': args.lambda_compact,
                             'train/lambda_separate': args.lambda_separate,
+                            'train/lambda_prototype': args.lambda_prototype,
                             'selector_trained': selector_trained,
                             'iteration': iter_num
                         })
@@ -675,13 +820,16 @@ if __name__ == "__main__":
             elif not args.use_dfp:
                 # 不使用DFP时的标准训练
                 metrics = train_stage_one(model, sampled_batch, optimizer, consistency_criterion, 
-                                        dice_loss, None, iter_num, writer)
+                                        dice_loss, None, proto_memory, iter_num, writer)
                 
                 if args.use_wandb:
                     wandb.log({
                         'train/loss': metrics['total_loss'],
                         'train/loss_supervised': metrics['loss_s'],
                         'train/loss_consistency': metrics['loss_c'],
+                        'train/loss_proto_intra': metrics['loss_proto_intra'],
+                        'train/loss_proto_inter': metrics['loss_proto_inter'],
+                        'train/loss_proto_total': metrics['loss_proto_total'],
                         'iteration': iter_num
                     })
 
