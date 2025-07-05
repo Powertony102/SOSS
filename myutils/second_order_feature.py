@@ -15,6 +15,35 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def safe_eigh(mat: torch.Tensor, jitter: float = 1e-5, max_attempts: int = 4):
+    """
+    对称矩阵特征分解，自动为病态矩阵加抖动(jitter)以确保收敛。
+    
+    Args:
+        mat: (..., C, C) 对称矩阵，需在最后两维上做分解
+        jitter: 初始对角抖动值
+        max_attempts: 失败后指数增大 jitter 的重试次数
+        
+    Returns:
+        eigvals, eigvecs  (与 torch.linalg.eigh 接口一致)
+    """
+    Bshape = mat.shape[:-2]
+    C = mat.shape[-1]
+    eye = torch.eye(C, device=mat.device, dtype=mat.dtype).expand(*Bshape, -1, -1)
+
+    # 强制对称，避免偶发非对称误差
+    mat = 0.5 * (mat + mat.transpose(-1, -2))
+
+    for i in range(max_attempts):
+        try:
+            return torch.linalg.eigh(mat.to(torch.float64))
+        except RuntimeError:
+            mat = mat + (jitter * (10 ** i)) * eye
+    
+    # 最后一次仍失败则降到 CPU 再试一次
+    return torch.linalg.eigh(mat.cpu().double())
+
+
 class SecondOrderFeatureModule(nn.Module):
     """
     Second-Order Feature Modeling Module for enhancing 3D medical image features
@@ -71,6 +100,7 @@ class SecondOrderFeatureModule(nn.Module):
         """
         B, C, H, W, D = x.shape
         N = H * W * D  # Total number of spatial locations
+        original_dtype = x.dtype
         
         # Step 1: Flatten spatial dimensions to get feature matrix X ∈ ℝ^{C×N}
         x_flat = x.view(B, C, N)  # (B, C, N)
@@ -91,12 +121,18 @@ class SecondOrderFeatureModule(nn.Module):
         var_outer = var.unsqueeze(2) * var.unsqueeze(1)  # (B, C, C)
         corr = cov / var_outer  # (B, C, C)
         
-        # Ensure correlation matrix is symmetric (numerical stability)
-        corr = (corr + corr.transpose(1, 2)) / 2
+        # 数值稳定性改进：转换到 float64 精度
+        cov = cov.double()
+        var = var.double()
+        corr = corr.double()
         
-        # Step 5: Eigendecomposition and select top-K eigenvectors
-        # torch.linalg.eigh returns eigenvalues in ascending order
-        eigvals, eigvecs = torch.linalg.eigh(corr)  # eigvals: (B, C), eigvecs: (B, C, C)
+        # 清理 NaN/Inf 和强制对称
+        corr = torch.nan_to_num(corr)
+        corr = 0.5 * (corr + corr.transpose(-1, -2))
+        
+        # Step 5: 安全的特征分解
+        eigvals64, eigvecs64 = safe_eigh(corr)
+        eigvals, eigvecs = eigvals64.to(original_dtype), eigvecs64.to(original_dtype)
         
         # Get top-K eigenvalues and corresponding eigenvectors (largest eigenvalues)
         topk_vals, indices = eigvals.topk(self.K, dim=-1)  # (B, K)
@@ -145,8 +181,9 @@ class SecondOrderFeatureModule(nn.Module):
             var = cov.diagonal(dim1=1, dim2=2).clamp(min=self.eps).sqrt()
             corr = cov / (var.unsqueeze(2) * var.unsqueeze(1))
             
-            # Eigendecomposition
-            eigvals, eigvecs = torch.linalg.eigh(corr)
+            # 使用安全的特征分解
+            eigvals64, eigvecs64 = safe_eigh(corr.double())
+            eigvals = eigvals64.to(corr.dtype)
             topk_vals, _ = eigvals.topk(self.K, dim=-1)
             
             return {
@@ -155,6 +192,23 @@ class SecondOrderFeatureModule(nn.Module):
                 'top_eigenvalues': topk_vals, # (B, K)
                 'explained_variance_ratio': topk_vals.sum(dim=-1) / eigvals.sum(dim=-1)  # (B,)
             }
+
+
+def _test_safe_eigh():
+    """测试 safe_eigh 函数的稳定性"""
+    torch.manual_seed(0)
+    # 创建极端病态矩阵
+    bad = torch.randn(2, 16, 16)
+    bad = bad @ bad.transpose(-1, -2) * 1e-6  # 极端病态
+    
+    # 测试安全特征分解
+    vals, vecs = safe_eigh(bad)
+    
+    # 验证分解结果的正确性
+    reconstructed = vecs @ torch.diag_embed(vals) @ vecs.transpose(-1, -2)
+    assert torch.allclose(bad.double(), reconstructed, atol=1e-3), "特征分解重构失败"
+    
+    print("safe_eigh 病态矩阵测试通过")
 
 
 def test_second_order_feature_module():
@@ -317,6 +371,9 @@ def demo_integration_example():
 
 
 if __name__ == "__main__":
+    # 测试安全特征分解
+    _test_safe_eigh()
+    
     # Run tests
     module, output = test_second_order_feature_module()
     
