@@ -16,7 +16,7 @@ def test_prototype_memory():
     batch_size = 2
     feat_dim = 64
     num_classes = 2  # Foreground classes (excluding background)
-    H, W, D = 32, 32, 16
+    H, W, D = 112, 112, 80
     K = num_classes + 1  # Include background class
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -107,13 +107,11 @@ def example_usage():
     print("\n" + "="*60)
     print("Example Usage in Training Loop")
     print("="*60)
-    
-    # Model setup
-    num_classes = 2  # Binary segmentation (excluding background)
+
+    num_classes = 2
     feat_dim = 128
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
-    # Initialize prototype memory
+
     proto_mem = PrototypeMemory(
         num_classes=num_classes,
         feat_dim=feat_dim,
@@ -124,63 +122,60 @@ def example_usage():
         margin_m=1.0,
         device=device
     ).to(device)
-    
+
     print(f"Initialized PrototypeMemory with {num_classes} classes on {device}")
-    
-    # Simulate training data
+
     batch_size = 4
     H, W, D = 64, 64, 32
-    
-    # Example integration in training step
+
     for epoch in range(3):
         print(f"\nEpoch {epoch + 1}:")
-        
-        # Simulate model outputs
+
         decoder_features = torch.randn(batch_size, feat_dim, H, W, D, device=device, requires_grad=True)
         segmentation_logits = torch.randn(batch_size, num_classes + 1, H, W, D, device=device)
         predictions = torch.softmax(segmentation_logits, dim=1)
-        
-        # Ground truth (first 2 samples labelled, last 2 unlabelled)
         ground_truth = torch.randint(0, num_classes + 1, (batch_size, 1, H, W, D), device=device)
         is_labelled = torch.tensor([True, True, False, False], device=device)
-        
-        # 只在loss部分需要梯度，原型更新和统计全部no_grad
+
+        # 1. 先用 no_grad 更新原型（不参与 autograd 图）
         with torch.no_grad():
-            proto_losses = proto_mem(
-                feat=decoder_features,
+            _ = proto_mem(
+                feat=decoder_features.detach(),  # detach防止污染
                 label=ground_truth,
                 pred=predictions,
                 is_labelled=is_labelled,
                 epoch_idx=epoch
             )
-            # detach打印
-            intra_loss = proto_losses['intra'].detach().item()
-            inter_loss = proto_losses['inter'].detach().item()
-            total_proto_loss = proto_losses['total'].detach().item()
-            n_confident = int(proto_losses['n_confident_pixels'])
-            n_protos = int(proto_losses['n_initialized_protos'])
-        print(f"  Intra-class loss: {intra_loss:.4f}")
-        print(f"  Inter-class loss: {inter_loss:.4f}")
-        print(f"  Total proto loss: {total_proto_loss:.4f}")
-        print(f"  Confident pixels: {n_confident}")
-        print(f"  Initialized prototypes: {n_protos}")
-        
-        # 重新forward一遍用于loss反向传播（不更新原型）
-        proto_losses_for_grad = proto_mem(
+
+        # 2. 用全新 forward 只做 loss 计算（不更新原型，不污染 buffer）
+        proto_losses = proto_mem(
             feat=decoder_features,
             label=ground_truth,
             pred=predictions,
             is_labelled=is_labelled,
             epoch_idx=None  # 不更新原型
         )
+
+        # detach打印
+        intra_loss = proto_losses['intra'].detach().item()
+        inter_loss = proto_losses['inter'].detach().item()
+        total_proto_loss = proto_losses['total'].detach().item()
+        n_confident = int(proto_losses['n_confident_pixels'])
+        n_protos = int(proto_losses['n_initialized_protos'])
+        print(f"  Intra-class loss: {intra_loss:.4f}")
+        print(f"  Inter-class loss: {inter_loss:.4f}")
+        print(f"  Total proto loss: {total_proto_loss:.4f}")
+        print(f"  Confident pixels: {n_confident}")
+        print(f"  Initialized prototypes: {n_protos}")
+
         dice_loss = torch.randn(1, device=device, requires_grad=True)
         consistency_loss = torch.randn(1, device=device, requires_grad=True)
-        total_loss = dice_loss + 0.1 * consistency_loss + 0.5 * proto_losses_for_grad['total']
+        total_loss = dice_loss + 0.1 * consistency_loss + 0.5 * proto_losses['total']
         print(f"  Combined total loss: {total_loss.detach().item():.4f}")
+
         total_loss.backward()
         print(f"  Gradients computed successfully")
-        
-        # Show prototype statistics every few epochs (all values detached)
+
         if (epoch + 1) % 2 == 0:
             with torch.no_grad():
                 stats = proto_mem.get_prototype_statistics()
@@ -190,7 +185,6 @@ def example_usage():
                 if 'mean_pairwise_distance' in stats:
                     mean_dist = float(stats['mean_pairwise_distance'])
                     print(f"  Mean prototype distance: {mean_dist:.4f}")
-
 
 def integration_example():
     """Example of integrating PrototypeMemory into existing training framework."""
