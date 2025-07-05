@@ -117,12 +117,9 @@ if args.deterministic:
     random.seed(args.seed)
     np.random.seed(args.seed)
 
-def extract_features_and_labels(volume_batch, label_batch, model, labeled_bs):
-    """提取特征和标签用于DFP更新"""
+def extract_features_and_labels(embedding_v, embedding_a, label_batch, labeled_bs):
+    """提取特征和标签用于DFP更新 - 使用已经计算好的特征"""
     with torch.no_grad():
-        # 获取特征
-        outputs_v, outputs_a, embedding_v, embedding_a = model(volume_batch)
-        
         # 只使用标记样本
         labeled_features_v = embedding_v[:labeled_bs]  # [labeled_bs, feat_dim, H, W, D]
         labeled_features_a = embedding_a[:labeled_bs]  # [labeled_bs, feat_dim, H, W, D]
@@ -249,8 +246,8 @@ def train_with_dfp(model, sampled_batch, optimizer, consistency_criterion, dice_
     # DFP相关损失
     loss_anchor = torch.tensor(0.0, device=device)
     if args.use_dfp and dfp is not None:
-        # 提取特征用于DFP更新
-        features_list, labels_list = extract_features_and_labels(volume_batch, label_batch, model, labeled_bs)
+        # 提取特征用于DFP更新 - 使用已经计算好的特征
+        features_list, labels_list = extract_features_and_labels(embedding_v, embedding_a, label_batch, labeled_bs)
         
         # 更新DFP
         dfp.update_labeled_features(features_list, labels_list)

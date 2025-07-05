@@ -126,8 +126,8 @@ class PrototypeManager:
                 continue
                 
             if len(features) > 0:
-                # 计算初始原型（平均值）
-                prototype = torch.mean(features, dim=0)  # [feature_dim]
+                # 计算初始原型（平均值）- 不保留梯度
+                prototype = torch.mean(features, dim=0).detach()  # [feature_dim]
                 self.prototypes[class_id] = prototype.to(self.device)
                 self.prototype_counts[class_id] = len(features)
         
@@ -149,15 +149,15 @@ class PrototypeManager:
                 continue
                 
             if len(features) > 0:
-                # 计算新特征的平均值
-                new_prototype = torch.mean(features, dim=0)  # [feature_dim]
+                # 计算新特征的平均值 - 不保留梯度
+                new_prototype = torch.mean(features, dim=0).detach()  # [feature_dim]
                 
                 if class_id in self.prototypes:
                     # 滑动平均更新
                     old_prototype = self.prototypes[class_id]
                     updated_prototype = (self.update_momentum * old_prototype + 
                                        (1 - self.update_momentum) * new_prototype)
-                    self.prototypes[class_id] = updated_prototype.to(self.device)
+                    self.prototypes[class_id] = updated_prototype.detach().to(self.device)
                     self.prototype_counts[class_id] += len(features)
                 else:
                     # 新类别，直接设置
@@ -197,7 +197,7 @@ class PrototypeManager:
         
         for class_id, class_features in high_conf_features.items():
             if class_id in self.prototypes:
-                prototype = self.prototypes[class_id]  # [feature_dim]
+                prototype = self.prototypes[class_id].detach()  # [feature_dim] - 不参与梯度计算
                 
                 # 计算特征到原型的距离
                 distances = torch.norm(class_features - prototype.unsqueeze(0), dim=1)  # [N_class]
@@ -233,8 +233,8 @@ class PrototypeManager:
         # 计算所有类别对之间的分离损失
         for i in range(len(prototype_list)):
             for j in range(i + 1, len(prototype_list)):
-                prototype_i = prototype_list[i]
-                prototype_j = prototype_list[j]
+                prototype_i = prototype_list[i].detach()  # 不参与梯度计算
+                prototype_j = prototype_list[j].detach()  # 不参与梯度计算
                 
                 # 计算欧氏距离
                 distance = torch.norm(prototype_i - prototype_j)
@@ -314,16 +314,19 @@ class PrototypeManager:
             total_loss: 总损失
             loss_dict: 损失详情
         """
-        # 提取高置信度特征用于更新原型
-        high_conf_features = self.extract_high_confidence_features(
-            features, predictions, labels, is_labeled
-        )
+        # 提取高置信度特征用于更新原型（不需要梯度）
+        with torch.no_grad():
+            high_conf_features = self.extract_high_confidence_features(
+                features.detach(), predictions.detach(), 
+                labels.detach() if labels is not None else None, 
+                is_labeled
+            )
+            
+            # 更新原型
+            if len(high_conf_features) > 0:
+                self.update_prototypes(high_conf_features)
         
-        # 更新原型
-        if len(high_conf_features) > 0:
-            self.update_prototypes(high_conf_features)
-        
-        # 计算损失
+        # 计算损失（需要梯度）
         total_loss, loss_dict = self.compute_prototype_loss(
             features, predictions, labels, is_labeled, 
             intra_weight, inter_weight, margin
