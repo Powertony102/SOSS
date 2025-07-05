@@ -169,9 +169,17 @@ if __name__ == "__main__":
             volume_batch, label_batch = volume_batch.cuda(), label_batch.cuda()
             outputs, embedding = model(volume_batch)
             
+            # 调试信息：检查embedding的类型和形状
+            print(f"Debug: type(embedding) = {type(embedding)}")
+            print(f"Debug: embedding.shape = {embedding.shape}")
+            
             # 处理有标签部分的特征和标签
             labeled_features = embedding[:args.labeled_bs]  # (B, C, H, W, D)
             labeled_labels = label_batch[:args.labeled_bs]  # (B, 1, H, W, D)
+            
+            # 调试信息：检查处理前的形状
+            print(f"Debug: labeled_features.shape before processing = {labeled_features.shape}")
+            print(f"Debug: labeled_labels.shape before processing = {labeled_labels.shape}")
             
             # 将特征转换为二维张量 (N, C)
             B, C, H, W, D = labeled_features.shape
@@ -183,6 +191,14 @@ if __name__ == "__main__":
             # 确保在同一设备上
             labeled_features = labeled_features.to(embedding.device)
             labeled_labels = labeled_labels.to(embedding.device)
+            
+            # 调试信息：打印维度
+            print(f"Debug: labeled_features.shape = {labeled_features.shape}")
+            print(f"Debug: labeled_labels.shape = {labeled_labels.shape}")
+            print(f"Debug: labeled_features.dim() = {labeled_features.dim()}")
+            print(f"Debug: labeled_labels.dim() = {labeled_labels.dim()}")
+            print(f"Debug: labeled_labels.shape[0] = {labeled_labels.shape[0]}")
+            print(f"Debug: labeled_features.shape[0] = {labeled_features.shape[0]}")
             
             # 更新特征池
             feature_pool.add_to_global_pool(labeled_features, labeled_labels)

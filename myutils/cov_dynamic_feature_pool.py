@@ -68,7 +68,9 @@ class CovarianceDynamicFeaturePool:
         # 添加标签信息（如果提供）
         if labels is not None:
             if labels.dim() != 1 or labels.shape[0] != features.shape[0]:
-                raise ValueError(f"Labels should be 1D tensor with same batch size as features")
+                raise ValueError(f"Labels should be 1D tensor with same batch size as features. "
+                               f"Got labels.shape={labels.shape}, labels.dim()={labels.dim()}, "
+                               f"features.shape={features.shape}, features.shape[0]={features.shape[0]}")
             labels_gpu = labels.detach().to(self.device)
             self.global_labels.append(labels_gpu)
         else:
