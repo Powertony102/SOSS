@@ -378,17 +378,19 @@ class PrototypeMemory(nn.Module):
         """Get statistics about current prototypes."""
         init_mask = self.prototype_initialized
         stats = {
-            'num_initialized': init_mask.sum().item(),
-            'total_classes': self.num_classes,
-            'update_counts': self.update_count[init_mask].detach().cpu().numpy() if init_mask.any() else [],
-            'last_update_epoch': self.last_update_epoch.item(),
+            'num_initialized': int(init_mask.sum().detach().item()),
+            'total_classes': int(self.num_classes),
+            'update_counts': self.update_count[init_mask].detach().tolist() if init_mask.any() else [],
+            'last_update_epoch': int(self.last_update_epoch.detach().item()),
         }
         
         if init_mask.any():
             prototypes = self.prototypes[init_mask]
+            proto_norms = torch.norm(prototypes, p=2, dim=1).detach().tolist()
+            mean_proto_norm = float(torch.norm(prototypes, p=2, dim=1).mean().detach().item())
             stats.update({
-                'prototype_norms': torch.norm(prototypes, p=2, dim=1).detach().cpu().numpy(),
-                'mean_prototype_norm': torch.norm(prototypes, p=2, dim=1).mean().item(),
+                'prototype_norms': proto_norms,
+                'mean_prototype_norm': mean_proto_norm,
             })
             
             # Compute pairwise distances between prototypes
@@ -397,7 +399,8 @@ class PrototypeMemory(nn.Module):
                 proto_j = prototypes.unsqueeze(0)
                 distances = torch.norm(proto_i - proto_j, p=2, dim=2)
                 mask = torch.triu(torch.ones_like(distances, dtype=torch.bool), diagonal=1)
-                stats['pairwise_distances'] = distances[mask].detach().cpu().numpy()
-                stats['mean_pairwise_distance'] = distances[mask].mean().item()
+                pairwise_distances = distances[mask].detach().tolist()
+                stats['pairwise_distances'] = pairwise_distances
+                stats['mean_pairwise_distance'] = float(distances[mask].mean().detach().item())
         
         return stats 

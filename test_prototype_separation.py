@@ -57,10 +57,11 @@ def test_prototype_memory():
     # Test forward pass
     loss_dict = proto_mem(feat, label, pred, is_labelled, epoch_idx=0)
     
+    # Detach all values for printing BEFORE backward
     print(f"\nLoss computation:")
     for key, value in loss_dict.items():
         if isinstance(value, torch.Tensor):
-            print(f"  {key}: {value.item():.6f}")
+            print(f"  {key}: {value.detach().item():.6f}")
         else:
             print(f"  {key}: {value}")
     
@@ -73,7 +74,7 @@ def test_prototype_memory():
         total_loss.backward()
         print(f"  feat.grad is not None: {feat.grad is not None}")
         if feat.grad is not None:
-            print(f"  feat.grad.norm(): {feat.grad.norm().item():.6f}")
+            print(f"  feat.grad.norm(): {feat.grad.norm().detach().item():.6f}")
     
     # Test prototype statistics
     stats = proto_mem.get_prototype_statistics()
@@ -94,7 +95,7 @@ def test_prototype_memory():
             pred_new = torch.softmax(logits_new, dim=1)
             
             loss_dict_new = proto_mem(feat_new, label, pred_new, is_labelled, epoch_idx=epoch)
-            print(f"  Epoch {epoch} - total_loss: {loss_dict_new['total'].item():.6f}, "
+            print(f"  Epoch {epoch} - total_loss: {loss_dict_new['total'].detach().item():.6f}, "
                   f"n_confident: {loss_dict_new['n_confident_pixels']}, "
                   f"n_protos: {loss_dict_new['n_initialized_protos']}")
     
@@ -169,14 +170,17 @@ def example_usage():
         # Simulate total loss (combine with other losses)
         dice_loss = torch.randn(1, device=device, requires_grad=True)
         consistency_loss = torch.randn(1, device=device, requires_grad=True)
+        
         total_loss = dice_loss + 0.1 * consistency_loss + 0.5 * proto_losses['total']
+        
+        # Print total loss (detached) BEFORE backward
         print(f"  Combined total loss: {total_loss.detach().item():.4f}")
         
         # Backward pass
         total_loss.backward()
         print(f"  Gradients computed successfully")
         
-        # Show prototype statistics every few epochs (detach all values)
+        # Show prototype statistics every few epochs
         if (epoch + 1) % 2 == 0:
             stats = proto_mem.get_prototype_statistics()
             num_init = int(stats['num_initialized'])
