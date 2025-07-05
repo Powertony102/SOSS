@@ -31,7 +31,7 @@ from myutils.prototype_separation import PrototypeMemory
 ```python
 proto_memory = PrototypeMemory(
     num_classes=num_classes - 1,  # LA数据集：1个前景类
-    feat_dim=args.embedding_dim,
+    feat_dim=None,  # 运行时动态推断特征维度
     proto_momentum=args.proto_momentum,
     conf_thresh=args.proto_conf_thresh,
     lambda_intra=args.proto_lambda_intra,

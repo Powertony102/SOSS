@@ -39,7 +39,7 @@ class PrototypeMemory(nn.Module):
     def __init__(
         self,
         num_classes: int,
-        feat_dim: int,
+        feat_dim: Optional[int] = None,
         proto_momentum: float = 0.9,
         conf_thresh: float = 0.8,
         update_interval: int = 1,
@@ -60,15 +60,30 @@ class PrototypeMemory(nn.Module):
         self.margin_m = margin_m
         self.device = device
         
-        # Register prototype buffers - shape: (num_classes, feat_dim)
-        # Note: class 0 is background, so we store prototypes for classes 1 to num_classes
-        self.register_buffer('prototypes', torch.zeros(num_classes, feat_dim))
-        self.register_buffer('prototype_initialized', torch.zeros(num_classes, dtype=torch.bool))
-        self.register_buffer('last_update_epoch', torch.tensor(-1, dtype=torch.long))
+        if self.feat_dim is not None:
+            self._initialize_prototype_buffers()
+        else:
+            self.register_buffer('_buffers_initialized', torch.tensor(False, dtype=torch.bool))
         
         # Statistics tracking
         self.register_buffer('update_count', torch.zeros(num_classes, dtype=torch.long))
         
+    def _initialize_prototype_buffers(self):
+        """初始化原型相关的buffer"""
+        # Register prototype buffers - shape: (num_classes, feat_dim)
+        # Note: class 0 is background, so we store prototypes for classes 1 to num_classes
+        self.register_buffer('prototypes', torch.zeros(self.num_classes, self.feat_dim))
+        self.register_buffer('prototype_initialized', torch.zeros(self.num_classes, dtype=torch.bool))
+        self.register_buffer('last_update_epoch', torch.tensor(-1, dtype=torch.long))
+        self.register_buffer('_buffers_initialized', torch.tensor(True, dtype=torch.bool))
+    
+    def _ensure_buffers_initialized(self, feat_dim: int):
+        """确保原型buffers已初始化，如果未初始化则根据输入特征维度初始化"""
+        if not hasattr(self, '_buffers_initialized') or not self._buffers_initialized:
+            self.feat_dim = feat_dim
+            self._initialize_prototype_buffers()
+            logging.info(f"PrototypeMemory: 动态推断特征维度为 {feat_dim}")
+    
     def _get_high_confidence_mask(
         self, 
         pred_flat: torch.Tensor, 
@@ -161,6 +176,15 @@ class PrototypeMemory(nn.Module):
         """
         if not mask.any():
             return
+        
+        actual_feat_dim = features.shape[-1]
+        expected_feat_dim = self.prototypes.shape[1]
+        if actual_feat_dim != expected_feat_dim:
+            raise RuntimeError(
+                f"特征维度不匹配！实际输入特征维度: {actual_feat_dim}, "
+                f"原型内存期望维度: {expected_feat_dim}. "
+                f"请检查PrototypeMemory初始化时的feat_dim参数是否与模型输出特征维度一致。"
+            )
             
         # Get predicted classes for high-confidence pixels
         _, pred_classes = torch.max(preds[mask], dim=1)  # (M,) where M = mask.sum()
@@ -335,6 +359,8 @@ class PrototypeMemory(nn.Module):
         Returns:
             loss_dict: Dictionary containing 'intra', 'inter', and 'total' losses
         """
+        self._ensure_buffers_initialized(feat.shape[1])
+        
         # Flatten spatial dimensions
         feat_flat, pred_flat, label_flat, is_labelled_flat = self._flatten_spatial_dims(
             feat, pred, label, is_labelled

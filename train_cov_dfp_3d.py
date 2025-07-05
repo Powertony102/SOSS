@@ -613,7 +613,7 @@ if __name__ == "__main__":
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         proto_memory = PrototypeMemory(
             num_classes=num_classes - 1,  # LA数据集：1个前景类（不包括背景）
-            feat_dim=args.embedding_dim,
+            feat_dim=None,  # 修改：运行时动态推断特征维度
             proto_momentum=args.proto_momentum,
             conf_thresh=args.proto_conf_thresh,
             lambda_intra=args.proto_lambda_intra,
