@@ -200,7 +200,7 @@ class PrototypeMemory(nn.Module):
             if class_mask.any():
                 class_features = conf_features[class_mask]  # (N_c, C)
                 # 明确迁移到同设备
-                mean_proto = torch.mean(class_features, dim=0)
+                mean_proto = torch.mean(class_features, dim=0).detach()
                 self.prototypes[class_idx - 1] = mean_proto.to(self.prototypes.device)
                 self.prototype_initialized[class_idx - 1] = True
                 assert self.prototypes[class_idx - 1].device == class_features.device, '原型与特征设备不一致'
@@ -231,7 +231,7 @@ class PrototypeMemory(nn.Module):
             class_mask = (pred_classes == class_idx)
             if class_mask.any():
                 class_features = conf_features[class_mask]
-                new_prototype = torch.mean(class_features, dim=0)
+                new_prototype = torch.mean(class_features, dim=0).detach()
                 new_prototype = new_prototype.to(self.prototypes.device)
                 if self.prototype_initialized[class_idx - 1]:
                     old_prototype = self.prototypes[class_idx - 1]
