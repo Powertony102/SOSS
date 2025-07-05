@@ -20,10 +20,10 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 
 from myutils import ramps, losses, test_patch
-from myutils.cov_dynamic_feature_pool import CovarianceDynamicFeaturePool
-from myutils.prototype_separation import PrototypeMemory  # 新增：导入原型分离模块
+from myutils.dynamic_feature_pool import DynamicFeaturePool
 from dataloaders.dataset import *
 from networks.net_factory import net_factory
+from myutils.cov_dynamic_feature_pool import CovarianceDynamicFeaturePool
 
 def get_lambda_c(epoch):
     return args.consistency * ramps.sigmoid_rampup(epoch, args.consistency_rampup)
@@ -51,66 +51,19 @@ parser.add_argument('--base_lr', type=float, default=0.01, help='base learning r
 parser.add_argument('--labelnum', type=int, default=4, help='number of labeled samples')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--gpu', type=str, default='0', help='GPU to use')
-
 # 损失函数参数
 parser.add_argument('--lamda', type=float, default=0.5, help='weight for supervised loss')
 parser.add_argument('--consistency', type=float, default=1, help='consistency weight')
 parser.add_argument('--consistency_rampup', type=float, default=40.0, help='consistency rampup')
 parser.add_argument('--temperature', type=float, default=0.4, help='temperature for sharpening')
-parser.add_argument('--lambda_hcc', type=float, default=0.1, help='weight for HCC loss')
-
 # HCC参数
 parser.add_argument('--hcc_weights', type=str, default='0.5,0.5,1,1,1.5', help='HCC layer weights')
 parser.add_argument('--cov_mode', type=str, default='patch', choices=['full', 'patch'], help='covariance mode')
 parser.add_argument('--patch_size', type=int, default=4, help='patch size for covariance')
-
-# DFP参数
-parser.add_argument('--use_dfp', action='store_true', help='whether to use dynamic feature pool')
-parser.add_argument('--num_dfp', type=int, default=8, help='number of dynamic feature pools')
-parser.add_argument('--dfp_start_iter', type=int, default=2000, help='iteration to start building DFPs')
-parser.add_argument('--selector_train_iter', type=int, default=50, help='iterations for training selector')
-parser.add_argument('--dfp_reconstruct_interval', type=int, default=3000, help='interval for reconstructing DFPs')
-parser.add_argument('--max_global_features', type=int, default=50000, help='maximum global features')
-parser.add_argument('--embedding_dim', type=int, default=64, help='embedding dimension')
-
-# Two-Phase k-means参数（新增）
-parser.add_argument('--use_two_phase_kmeans', action='store_true', default=True, help='use Two-Phase k-means for DFP construction')
-parser.add_argument('--confidence_threshold', type=float, default=0.9, help='confidence threshold for high-quality features')
-parser.add_argument('--ema_momentum', type=float, default=0.9, help='EMA momentum for center updates')
-parser.add_argument('--spherical_kmeans_iterations', type=int, default=50, help='max iterations for spherical k-means')
-
-# 度量学习参数（新增）
-parser.add_argument('--lambda_compact', type=float, default=0.1, help='weight for intra-pool compactness loss')
-parser.add_argument('--lambda_separate', type=float, default=0.05, help='weight for inter-pool separation loss')
-parser.add_argument('--separation_margin', type=float, default=1.0, help='margin for inter-pool separation loss with Softplus (recommended: 0.5-2.0 for distance squared)')
-
-# 原型分离参数（新增）
-parser.add_argument('--use_prototype_separation', action='store_true', help='whether to use prototype separation module')
-parser.add_argument('--lambda_prototype', type=float, default=0.3, help='weight for prototype separation loss')
-parser.add_argument('--proto_momentum', type=float, default=0.95, help='momentum for prototype updates')
-parser.add_argument('--proto_conf_thresh', type=float, default=0.85, help='confidence threshold for prototype updates')
-parser.add_argument('--proto_lambda_intra', type=float, default=0.3, help='weight for intra-class compactness in prototype loss')
-parser.add_argument('--proto_lambda_inter', type=float, default=0.1, help='weight for inter-class separation in prototype loss')
-parser.add_argument('--proto_margin', type=float, default=1.5, help='margin for inter-class separation in prototype loss')
-parser.add_argument('--proto_update_interval', type=int, default=5, help='interval for prototype updates (in batches)')
-
 # 其他参数
 parser.add_argument('--use_wandb', action='store_true', help='use wandb for logging')
 parser.add_argument('--wandb_project', type=str, default='Cov-DFP', help='wandb project name')
 parser.add_argument('--wandb_entity', type=str, default=None, help='wandb entity name')
-parser.add_argument('--consistency_o', type=float, default=0.05, help='lambda_s to balance sim loss')
-parser.add_argument('--hcc_patch_strategy', type=str, default='mean_cov', 
-                    choices=['mean_cov', 'mean_loss', 'max_loss', 'topk'],
-                    help='patch strategy for HCC loss: mean_cov|mean_loss|max_loss|topk')
-parser.add_argument('--hcc_topk', type=int, default=5, help='top-k value when hcc_patch_strategy is topk')
-parser.add_argument('--hcc_metric', type=str, default='fro', choices=['fro', 'log'],
-                    help='metric for HCC loss computation: fro (Frobenius) or log (Log-Euclidean)')
-parser.add_argument('--hcc_scale', type=float, default=1.0, help='scaling factor for HCC loss')
-parser.add_argument('--hcc_divide_by_dim', action='store_true', default=True, 
-                    help='whether to divide CORAL loss by dimension squared')
-parser.add_argument('--memory_num', type=int, default=256, help='num of embeddings per class in memory bank')
-parser.add_argument('--num_filtered', type=int, default=12800,
-                    help='num of unlabeled embeddings to calculate similarity')
 parser.add_argument('--deterministic', type=int, default=1, help='whether use deterministic training')
 
 args = parser.parse_args()
@@ -563,68 +516,24 @@ if __name__ == "__main__":
 
     # 初始化wandb
     if args.use_wandb:
-        wandb_tags = [args.dataset_name, "cov_dfp", f"dfp_{args.num_dfp}", "metric_learning"]
-        if args.use_prototype_separation:
-            wandb_tags.append("prototype_separation")
-        
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
             config=vars(args),
             name=f"{args.exp}_{args.model}_dfp{args.num_dfp}_feat{args.embedding_dim}_compact{args.lambda_compact}_separate{args.lambda_separate}_proto{args.lambda_prototype if args.use_prototype_separation else 0}",
-            tags=wandb_tags
         )
         logging.info(f"Wandb initialized with project: {args.wandb_project}")
 
     # 创建模型
-    model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train", 
-                       feat_dim=args.embedding_dim, num_dfp=args.num_dfp, use_selector=True)
-    
-    # 移动模型到GPU
+    model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train")
     if torch.cuda.is_available():
         model = model.cuda()
         logging.info("Model moved to GPU")
     else:
         logging.warning("CUDA not available, using CPU")
 
-    # 创建协方差DFP (指定GPU设备)
-    cov_dfp = None
-    if args.use_dfp:
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        cov_dfp = CovarianceDynamicFeaturePool(
-            feature_dim=args.embedding_dim,
-            num_dfp=args.num_dfp,
-            max_global_features=args.max_global_features,
-            device=device
-        )
-        
-        # 启用Two-Phase k-means模式（推荐）
-        cov_dfp.enable_two_phase_kmeans(
-            num_classes=num_classes,  # 2 for binary segmentation
-            prototypes_per_class=None  # 自动平均分配
-        )
-        
-        logging.info(f"CovarianceDynamicFeaturePool created on device: {device}")
-        logging.info(f"Two-Phase k-means enabled with {num_classes} classes")
-
-    # 创建原型内存模块（新增）
-    proto_memory = None
-    if args.use_prototype_separation:
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        proto_memory = PrototypeMemory(
-            num_classes=num_classes - 1,  # LA数据集：1个前景类（不包括背景）
-            feat_dim=None,  # 修改：运行时动态推断特征维度
-            proto_momentum=args.proto_momentum,
-            conf_thresh=args.proto_conf_thresh,
-            lambda_intra=args.proto_lambda_intra,
-            lambda_inter=args.proto_lambda_inter,
-            margin_m=args.proto_margin,
-            device=device
-        ).to(device)
-        
-        logging.info(f"PrototypeMemory created on device: {device}")
-        logging.info(f"Prototype config: momentum={args.proto_momentum}, conf_thresh={args.proto_conf_thresh}")
-        logging.info(f"Prototype losses: λ_intra={args.proto_lambda_intra}, λ_inter={args.proto_lambda_inter}, margin={args.proto_margin}")
+    # 创建CovarianceDynamicFeaturePool
+    feature_pool = CovarianceDynamicFeaturePool(feature_dim=32, num_dfp=2, max_global_features=10000, device='cuda')
 
     # 创建数据加载器
     if args.dataset_name == "LA":
@@ -648,232 +557,61 @@ if __name__ == "__main__":
     trainloader = DataLoader(db_train, batch_sampler=batch_sampler, num_workers=4, pin_memory=True,
                              worker_init_fn=worker_init_fn)
 
-    # 创建优化器
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
-    
-    # Selector单独的优化器
-    selector_optimizer = None
-    if args.use_dfp:
-        selector_params = list(model.dfp_selector.parameters())
-        selector_optimizer = optim.Adam(selector_params, lr=0.001, weight_decay=0.0001)
-
-    # 初始化tensorboard writer
-    writer = SummaryWriter(snapshot_path + '/log') if not args.use_wandb else None
-    logging.info("{} iterations per epoch".format(len(trainloader)))
-    
-    consistency_criterion = losses.mse_loss
+    writer = SummaryWriter(snapshot_path + '/log')
     dice_loss = losses.Binary_dice_loss
     iter_num = 0
     best_dice = 0
     max_epoch = max_iterations // len(trainloader) + 1
-    lr_ = base_lr
-    
-    # 训练状态
-    dfps_built = False
-    selector_trained = False  # selector是否已训练好
-    selector_train_counter = 0
-    last_dfp_reconstruct_iter = 0  # 上次DFP重构的迭代数
-    
     iterator = tqdm(range(max_epoch), ncols=70)
     for epoch_num in iterator:
         for i_batch, sampled_batch in enumerate(trainloader):
             iter_num += 1
-            
-            # 阶段判断
-            if iter_num < args.dfp_start_iter:
-                # 阶段一：初始预训练
-                metrics = train_stage_one(model, sampled_batch, optimizer, consistency_criterion, 
-                                        dice_loss, cov_dfp, proto_memory, iter_num, writer)
-                
-                # 记录指标
-                if args.use_wandb:
-                    wandb.log({
-                        'stage': 1,
-                        'train/loss': metrics['total_loss'],
-                        'train/loss_supervised': metrics['loss_s'],
-                        'train/loss_consistency': metrics['loss_c'],
-                        'train/loss_proto_intra': metrics['loss_proto_intra'],
-                        'train/loss_proto_inter': metrics['loss_proto_inter'],
-                        'train/loss_proto_total': metrics['loss_proto_total'],
-                        'train/lambda_c': metrics['lambda_c'],
-                        'iteration': iter_num
-                    })
-                    
-                    if args.use_dfp and cov_dfp is not None:
-                        stats = cov_dfp.get_statistics()
-                        wandb.log({
-                            'dfp/global_pool_size': stats['global_pool_size'],
-                            'iteration': iter_num
-                        })
-            
-            elif iter_num == args.dfp_start_iter and args.use_dfp:
-                # 阶段二：构建DFP
-                logging.info("Starting Stage 2: Building DFPs...")
-                dfps_built = train_stage_two_build_dfp(cov_dfp)
-                last_dfp_reconstruct_iter = iter_num
-                
-                if dfps_built:
-                    stats = cov_dfp.get_statistics()
-                    logging.info("DFP construction completed, starting selector training...")
-                    selector_trained = False  # 需要重新训练selector
-                    selector_train_counter = 0  # 重置selector计数器
-                    
-                    if args.use_wandb:
-                        wandb.log({
-                            'stage': 2,
-                            'dfp/dfps_built': True,
-                            'dfp/min_dfp_size': stats['min_dfp_size'],
-                            'dfp/max_dfp_size': stats['max_dfp_size'],
-                            'dfp/mean_dfp_size': stats['mean_dfp_size'],
-                            'selector_trained': selector_trained,
-                            'iteration': iter_num
-                        })
-                
-                # 构建DFP后，开始训练selector
-                if dfps_built:
-                    logging.info(f"Stage 3A - Starting Selector Training: counter={selector_train_counter}/{args.selector_train_iter}")
-                    selector_metrics = train_stage_three_selector(model, sampled_batch, selector_optimizer, 
-                                                                cov_dfp, iter_num)
-                    selector_train_counter += 1
-                    
-                    if args.use_wandb:
-                        wandb.log({
-                            'stage': 3,
-                            'submode': 'selector',
-                            'selector/loss': selector_metrics['selector_loss'],
-                            'selector/accuracy': selector_metrics['selector_accuracy'],
-                            'selector_train_counter': selector_train_counter,
-                            'selector_trained': selector_trained,
-                            'iteration': iter_num
-                        })
-            
-            elif iter_num > args.dfp_start_iter and args.use_dfp and dfps_built:
-                # 阶段三：循环训练
-                
-                # 检查是否需要重构DFP
-                if iter_num - last_dfp_reconstruct_iter >= args.dfp_reconstruct_interval:
-                    logging.info(f"Reconstructing DFPs at iteration {iter_num}...")
-                    cov_dfp.reconstruct_dfps()
-                    last_dfp_reconstruct_iter = iter_num
-                    selector_trained = False  # 需要重新训练selector
-                    selector_train_counter = 0  # 重置selector计数器
-                    logging.info("DFP reconstructed, selector needs retraining")
-                    
-                    if args.use_wandb:
-                        wandb.log({
-                            'stage': 3,
-                            'submode': 'dfp_reconstruct',
-                            'dfp_reconstructed': True,
-                            'selector_trained': selector_trained,
-                            'iteration': iter_num
-                        })
-                
-                # 训练逻辑
-                if not selector_trained:
-                    # 阶段3A：训练Selector直到收敛
-                    if selector_train_counter < args.selector_train_iter:
-                        logging.info(f"Stage 3A - Training Selector: counter={selector_train_counter}/{args.selector_train_iter}")
-                        selector_metrics = train_stage_three_selector(model, sampled_batch, selector_optimizer, 
-                                                                    cov_dfp, iter_num)
-                        selector_train_counter += 1
-                        
-                        # 检查是否完成selector训练
-                        if selector_train_counter >= args.selector_train_iter:
-                            selector_trained = True
-                            logging.info(f"Selector training completed! Switching to main model training.")
-                        
-                        if args.use_wandb:
-                            wandb.log({
-                                'stage': 3,
-                                'submode': 'selector',
-                                'selector/loss': selector_metrics['selector_loss'],
-                                'selector/accuracy': selector_metrics['selector_accuracy'],
-                                'selector_train_counter': selector_train_counter,
-                                'selector_trained': selector_trained,
-                                'iteration': iter_num
-                            })
-                else:
-                    # 阶段3B：使用训练好的selector进行主模型训练
-                    logging.info(f"Stage 3B - Training Main Model with trained selector")
-                    metrics = train_stage_three_main(model, sampled_batch, optimizer, consistency_criterion, 
-                                                   dice_loss, cov_dfp, proto_memory, iter_num, writer)
-                    
-                    if args.use_wandb:
-                        wandb.log({
-                            'stage': 3,
-                            'submode': 'main',
-                            'train/loss': metrics['total_loss'],
-                            'train/loss_supervised': metrics['loss_s'],
-                            'train/loss_consistency': metrics['loss_c'],
-                            'train/loss_compact': metrics['loss_compact'],
-                            'train/loss_separate': metrics['loss_separate'],
-                            'train/loss_proto_intra': metrics['loss_proto_intra'],
-                            'train/loss_proto_inter': metrics['loss_proto_inter'],
-                            'train/loss_proto_total': metrics['loss_proto_total'],
-                            'train/lambda_compact': args.lambda_compact,
-                            'train/lambda_separate': args.lambda_separate,
-                            'train/lambda_prototype': args.lambda_prototype,
-                            'selector_trained': selector_trained,
-                            'iteration': iter_num
-                        })
-                    
-            elif not args.use_dfp:
-                # 不使用DFP时的标准训练
-                metrics = train_stage_one(model, sampled_batch, optimizer, consistency_criterion, 
-                                        dice_loss, None, proto_memory, iter_num, writer)
-                
-                if args.use_wandb:
-                    wandb.log({
-                        'train/loss': metrics['total_loss'],
-                        'train/loss_supervised': metrics['loss_s'],
-                        'train/loss_consistency': metrics['loss_c'],
-                        'train/loss_proto_intra': metrics['loss_proto_intra'],
-                        'train/loss_proto_inter': metrics['loss_proto_inter'],
-                        'train/loss_proto_total': metrics['loss_proto_total'],
-                        'iteration': iter_num
-                    })
-
-            # 验证和保存模型
+            model.train()
+            volume_batch, label_batch, idx = sampled_batch['image'], sampled_batch['label'], sampled_batch['idx']
+            volume_batch, label_batch = volume_batch.cuda(), label_batch.cuda()
+            outputs, embedding = model(volume_batch)
+            # 只用有标签部分
+            labeled_features = embedding[:args.labeled_bs, ...]
+            labeled_labels = label_batch[:args.labeled_bs, ...]
+            labeled_features = labeled_features.permute(0, 2, 3, 4, 1).contiguous().view(-1, embedding.shape[1])
+            labeled_labels = labeled_labels.view(-1)
+            feature_pool.add_to_global_pool(labeled_features, labeled_labels)
+            # 损失与优化
+            # 以outputs为二分类输出，取前labeled_bs个batch
+            y = outputs[:args.labeled_bs, ...]
+            y_prob = torch.softmax(y, dim=1)
+            loss = dice_loss(y_prob[:, 1, ...], label_batch[:args.labeled_bs, ...] == 1)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            # 日志
+            logging.info(f"Iter {iter_num}: loss={loss:.4f}")
+            # 验证与保存
             if iter_num >= 1000 and iter_num % 500 == 0:
                 model.eval()
                 if args.dataset_name == "LA":
                     dice_sample = test_patch.var_all_case(model, num_classes=num_classes, patch_size=patch_size,
                                                           stride_xy=18, stride_z=4, dataset_name='LA', 
                                                           dataset_path=args.dataset_path)
-                
                 if dice_sample > best_dice:
                     best_dice = dice_sample
-                    save_mode_path = os.path.join(snapshot_path, 'iter_{}_dice_{}.pth'.format(iter_num, best_dice))
-                    save_best_path = os.path.join(snapshot_path, '{}_best_model.pth'.format(args.model))
+                    save_mode_path = os.path.join(snapshot_path, f'iter_{iter_num}_dice_{best_dice}.pth')
+                    save_best_path = os.path.join(snapshot_path, f'{args.model}_best_model.pth')
                     torch.save(model.state_dict(), save_mode_path)
                     torch.save(model.state_dict(), save_best_path)
-                    logging.info("save best model to {}".format(save_mode_path))
-                
-                # 记录验证指标
-                if args.use_wandb:
-                    wandb.log({
-                        'val/dice': dice_sample,
-                        'val/best_dice': best_dice,
-                        'iteration': iter_num
-                    })
-                else:
-                    writer.add_scalar('Var_dice/Dice', dice_sample, iter_num)
-                    writer.add_scalar('Var_dice/Best_dice', best_dice, iter_num)
-                
+                    logging.info(f"save best model to {save_mode_path}")
+                writer.add_scalar('Var_dice/Dice', dice_sample, iter_num)
+                writer.add_scalar('Var_dice/Best_dice', best_dice, iter_num)
                 model.train()
-
             if iter_num >= max_iterations:
-                save_mode_path = os.path.join(snapshot_path, 'iter_' + str(iter_num) + '.pth')
+                save_mode_path = os.path.join(snapshot_path, f'iter_{iter_num}.pth')
                 torch.save(model.state_dict(), save_mode_path)
-                logging.info("save model to {}".format(save_mode_path))
+                logging.info(f"save model to {save_mode_path}")
                 break
-                
         if iter_num >= max_iterations:
             iterator.close()
             break
-    
-    # 关闭日志
+    writer.close()
     if args.use_wandb:
-        wandb.finish()
-    else:
-        writer.close() 
+        wandb.finish() 

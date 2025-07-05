@@ -1,6 +1,5 @@
 import torch
 from torch import nn
-from .selector_network import create_selector
 from myutils.second_order_feature import SecondOrderFeatureModule
 
 
@@ -123,12 +122,16 @@ class Encoder(nn.Module):
         convBlock = ConvBlock if not has_residual else ResidualConvBlock
         self.block_one = convBlock(1, n_channels, n_filters, normalization=normalization)
         self.block_one_dw = DownsamplingConvBlock(n_filters, 2 * n_filters, normalization=normalization)
+        self.sofm1 = SecondOrderFeatureModule2D(K=8, mlp_hidden=2 * n_filters)
         self.block_two = convBlock(2, n_filters * 2, n_filters * 2, normalization=normalization)
         self.block_two_dw = DownsamplingConvBlock(n_filters * 2, n_filters * 4, normalization=normalization)
+        self.sofm2 = SecondOrderFeatureModule2D(K=8, mlp_hidden=4 * n_filters)
         self.block_three = convBlock(3, n_filters * 4, n_filters * 4, normalization=normalization)
         self.block_three_dw = DownsamplingConvBlock(n_filters * 4, n_filters * 8, normalization=normalization)
+        self.sofm3 = SecondOrderFeatureModule2D(K=8, mlp_hidden=8 * n_filters)
         self.block_four = convBlock(3, n_filters * 8, n_filters * 8, normalization=normalization)
         self.block_four_dw = DownsamplingConvBlock(n_filters * 8, n_filters * 16, normalization=normalization)
+        self.sofm4 = SecondOrderFeatureModule2D(K=8, mlp_hidden=16 * n_filters)
         self.block_five = convBlock(3, n_filters * 16, n_filters * 16, normalization=normalization)
         self.second_order_module = SecondOrderFeatureModule(
             K=8,
@@ -140,12 +143,16 @@ class Encoder(nn.Module):
     def forward(self, input):
         x1 = self.block_one(input)
         x1_dw = self.block_one_dw(x1)
+        x1_dw = self.sofm1(x1_dw)
         x2 = self.block_two(x1_dw)
         x2_dw = self.block_two_dw(x2)
+        x2_dw = self.sofm2(x2_dw)
         x3 = self.block_three(x2_dw)
         x3_dw = self.block_three_dw(x3)
+        x3_dw = self.sofm3(x3_dw)
         x4 = self.block_four(x3_dw)
         x4_dw = self.block_four_dw(x4)
+        x4_dw = self.sofm4(x4_dw)
         x5 = self.block_five(x4_dw)
         x5_enhanced = self.second_order_module(x5)
         x5 = self.channel_adjust(x5_enhanced)
@@ -206,7 +213,6 @@ class corf(nn.Module):
         self.n_filters = n_filters
         self.feat_dim = feat_dim
         self.num_dfp = num_dfp
-        self.use_selector = use_selector
         self.encoder1 = Encoder(n_channels, n_classes, n_filters, normalization, has_dropout, has_residual)
         self.encoder2 = Encoder(n_channels, n_classes, n_filters, normalization, has_dropout, has_residual)
         self.decoder1 = Decoder(n_channels, n_classes, n_filters, normalization, has_dropout, has_residual, 0)
@@ -235,14 +241,6 @@ class corf(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(feat_dim, feat_dim)
         )
-        if self.use_selector:
-            self.dfp_selector = create_selector(
-                selector_type="simple",
-                feature_dim=feat_dim,
-                num_dfp=num_dfp,
-                hidden_dim=128,
-                dropout=0.1
-            )
     def forward(self, input, with_hcc=False, with_selector=False, region_features=None):
         features1 = self.encoder1(input)
         features2 = self.encoder2(input)
@@ -257,15 +255,8 @@ class corf(nn.Module):
         if with_hcc:
             output_dict['features1'] = features1
             output_dict['features2'] = features2
-        if with_selector and self.use_selector and region_features is not None:
-            selector_logits = self.dfp_selector(region_features)
-            dfp_predictions = torch.argmax(selector_logits, dim=-1)
-            output_dict['selector_logits'] = selector_logits
-            output_dict['dfp_predictions'] = dfp_predictions
-        if not with_hcc and not with_selector:
+        if not with_hcc:
             return out_seg1, out_seg2, embedding1, embedding2
-        elif with_hcc and not with_selector:
-            return out_seg1, out_seg2, embedding1, embedding2, features1, features2
         else:
             return output_dict
     
