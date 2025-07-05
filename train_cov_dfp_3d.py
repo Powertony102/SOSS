@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# 基于协方差的动态特征池(Cov-DFP)三阶段训练脚本
 
 import os
 import sys
@@ -20,8 +19,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 
 from myutils import ramps, losses, test_patch
-from myutils.cov_dynamic_feature_pool import CovarianceDynamicFeaturePool
-from myutils.hcc_loss import hierarchical_coral, parse_hcc_weights
+from myutils.dynamic_feature_pool import DynamicFeaturePool
 from dataloaders.dataset import *
 from networks.net_factory import net_factory
 
@@ -41,7 +39,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_name', type=str, default='LA', help='dataset_name')
 parser.add_argument('--root_path', type=str, default='./', help='Root path of the project')
 parser.add_argument('--dataset_path', type=str, default='/home/jovyan/work/medical_dataset/LA', help='Path to the dataset')
-parser.add_argument('--exp', type=str, default='cov_dfp', help='exp_name')
+parser.add_argument('--exp', type=str, default='corn_dfp', help='exp_name')
 parser.add_argument('--model', type=str, default='corn', help='model_name')
 parser.add_argument('--max_iteration', type=int, default=15000, help='maximum iteration to train')
 parser.add_argument('--max_samples', type=int, default=80, help='maximum samples to train')
@@ -57,65 +55,31 @@ parser.add_argument('--lamda', type=float, default=0.5, help='weight for supervi
 parser.add_argument('--consistency', type=float, default=1, help='consistency weight')
 parser.add_argument('--consistency_rampup', type=float, default=40.0, help='consistency rampup')
 parser.add_argument('--temperature', type=float, default=0.4, help='temperature for sharpening')
-parser.add_argument('--lambda_hcc', type=float, default=0.1, help='weight for HCC loss')
-
-# HCC参数
-parser.add_argument('--hcc_weights', type=str, default='0.5,0.5,1,1,1.5', help='HCC layer weights')
-parser.add_argument('--cov_mode', type=str, default='patch', choices=['full', 'patch'], help='covariance mode')
-parser.add_argument('--patch_size', type=int, default=4, help='patch size for covariance')
+parser.add_argument('--consistency_o', type=float, default=0.05, help='lambda_s to balance sim loss')
 
 # DFP参数
 parser.add_argument('--use_dfp', action='store_true', help='whether to use dynamic feature pool')
-parser.add_argument('--num_dfp', type=int, default=8, help='number of dynamic feature pools')
-parser.add_argument('--dfp_start_iter', type=int, default=2000, help='iteration to start building DFPs')
-parser.add_argument('--selector_train_iter', type=int, default=50, help='iterations for training selector')
-parser.add_argument('--dfp_reconstruct_interval', type=int, default=3000, help='interval for reconstructing DFPs')
-parser.add_argument('--max_global_features', type=int, default=50000, help='maximum global features')
+parser.add_argument('--num_eigenvectors', type=int, default=8, help='number of eigenvectors for second-order anchors')
+parser.add_argument('--max_store', type=int, default=10000, help='max features to store per class')
+parser.add_argument('--ema_alpha', type=float, default=0.9, help='EMA alpha for feature update')
 parser.add_argument('--embedding_dim', type=int, default=64, help='embedding dimension')
-
-# Two-Phase k-means参数（新增）
-parser.add_argument('--use_two_phase_kmeans', action='store_true', default=True, help='use Two-Phase k-means for DFP construction')
-parser.add_argument('--confidence_threshold', type=float, default=0.9, help='confidence threshold for high-quality features')
-parser.add_argument('--ema_momentum', type=float, default=0.9, help='EMA momentum for center updates')
-parser.add_argument('--spherical_kmeans_iterations', type=int, default=50, help='max iterations for spherical k-means')
-
-# 度量学习参数（新增）
-parser.add_argument('--lambda_compact', type=float, default=0.1, help='weight for intra-pool compactness loss')
-parser.add_argument('--lambda_separate', type=float, default=0.05, help='weight for inter-pool separation loss')
-parser.add_argument('--separation_margin', type=float, default=1.0, help='margin for inter-pool separation loss with Softplus (recommended: 0.5-2.0 for distance squared)')
+parser.add_argument('--memory_num', type=int, default=256, help='num of embeddings per class in memory bank')
+parser.add_argument('--num_filtered', type=int, default=12800, help='num of unlabeled embeddings to calculate similarity')
 
 # 其他参数
 parser.add_argument('--use_wandb', action='store_true', help='use wandb for logging')
-parser.add_argument('--wandb_project', type=str, default='Cov-DFP', help='wandb project name')
+parser.add_argument('--wandb_project', type=str, default='CORN-DFP', help='wandb project name')
 parser.add_argument('--wandb_entity', type=str, default=None, help='wandb entity name')
-parser.add_argument('--consistency_o', type=float, default=0.05, help='lambda_s to balance sim loss')
-parser.add_argument('--hcc_patch_strategy', type=str, default='mean_cov', 
-                    choices=['mean_cov', 'mean_loss', 'max_loss', 'topk'],
-                    help='patch strategy for HCC loss: mean_cov|mean_loss|max_loss|topk')
-parser.add_argument('--hcc_topk', type=int, default=5, help='top-k value when hcc_patch_strategy is topk')
-parser.add_argument('--hcc_metric', type=str, default='fro', choices=['fro', 'log'],
-                    help='metric for HCC loss computation: fro (Frobenius) or log (Log-Euclidean)')
-parser.add_argument('--hcc_scale', type=float, default=1.0, help='scaling factor for HCC loss')
-parser.add_argument('--hcc_divide_by_dim', action='store_true', default=True, 
-                    help='whether to divide CORAL loss by dimension squared')
-parser.add_argument('--memory_num', type=int, default=256, help='num of embeddings per class in memory bank')
-parser.add_argument('--num_filtered', type=int, default=12800,
-                    help='num of unlabeled embeddings to calculate similarity')
 parser.add_argument('--deterministic', type=int, default=1, help='whether use deterministic training')
 
 args = parser.parse_args()
 
-# Parse HCC weights
-hcc_weights = parse_hcc_weights(args.hcc_weights, num_layers=5)
-
-snapshot_path = "./model/LA_{}_{}_dfp{}_memory{}_feat{}_compact{}_separate{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}".format(
+snapshot_path = "./model/LA_{}_{}_{}_memory{}_feat{}_labeled_numfiltered_{}_consistency_{}_rampup_{}_consis_o_{}_iter_{}_seed_{}".format(
     args.exp,
     args.labelnum,
-    args.num_dfp,
+    args.model,
     args.memory_num,
     args.embedding_dim,
-    args.lambda_compact,
-    args.lambda_separate,
     args.num_filtered,
     args.consistency,
     args.consistency_rampup,
@@ -142,25 +106,110 @@ if args.deterministic:
     random.seed(args.seed)
     np.random.seed(args.seed)
 
-def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice_loss, 
-                   cov_dfp, iter_num, writer=None):
-    """阶段一：初始预训练
+def extract_features_and_labels(volume_batch, label_batch, model, labeled_bs):
+    """提取特征和标签用于DFP更新"""
+    with torch.no_grad():
+        # 获取特征
+        outputs_v, outputs_a, embedding_v, embedding_a = model(volume_batch)
+        
+        # 只使用标记样本
+        labeled_features_v = embedding_v[:labeled_bs]  # [labeled_bs, feat_dim, H, W, D]
+        labeled_features_a = embedding_a[:labeled_bs]  # [labeled_bs, feat_dim, H, W, D]
+        labeled_labels = label_batch[:labeled_bs]      # [labeled_bs, H, W, D]
+        
+        # 转换为列表格式
+        features_list = []
+        labels_list = []
+        
+        for i in range(labeled_bs):
+            # 获取单个样本的特征和标签
+            feat_v = labeled_features_v[i].permute(1, 2, 3, 0).contiguous()  # [H, W, D, feat_dim]
+            feat_a = labeled_features_a[i].permute(1, 2, 3, 0).contiguous()  # [H, W, D, feat_dim]
+            label = labeled_labels[i]  # [H, W, D]
+            
+            # 展平为像素级特征
+            feat_v_flat = feat_v.view(-1, feat_v.shape[-1])  # [H*W*D, feat_dim]
+            feat_a_flat = feat_a.view(-1, feat_a.shape[-1])  # [H*W*D, feat_dim]
+            label_flat = label.view(-1)  # [H*W*D]
+            
+            # 平均两个分支的特征
+            feat_combined = (feat_v_flat + feat_a_flat) / 2
+            
+            features_list.append(feat_combined)
+            labels_list.append(label_flat)
     
-    目标：训练初步的主模型，建立全局特征池
-    """
+    return features_list, labels_list
+
+def sample_anchors_from_dfp(dfp, num_eigenvectors=8):
+    """从DFP中采样anchor特征（GPU版本）"""
+    anchor_list = dfp.sample_labeled_features(num_eigenvectors)
+    
+    # 直接返回GPU张量列表
+    anchor_tensors = []
+    for anchors in anchor_list:
+        if anchors is not None:
+            anchor_tensors.append(anchors)  # 已经是GPU张量
+        else:
+            anchor_tensors.append(None)
+    
+    return anchor_tensors
+
+def compute_anchor_loss(features_list, labels_list, anchor_tensors, device):
+    """计算anchor相似性损失（GPU版本）"""
+    total_loss = torch.tensor(0.0, device=device)
+    num_valid = 0
+    
+    for feat_batch, label_batch in zip(features_list, labels_list):
+        # 确保特征在正确的设备上
+        feat_batch = feat_batch.to(device)
+        label_batch = label_batch.to(device)
+        
+        for class_id in range(num_classes):
+            # 获取当前类别的特征
+            class_mask = (label_batch == class_id)
+            if not class_mask.any():
+                continue
+                
+            class_features = feat_batch[class_mask]  # [N_class, feat_dim]
+            
+            # 获取对应的anchor（已经在GPU上）
+            if anchor_tensors[class_id] is not None:
+                anchors = anchor_tensors[class_id].to(device)  # [num_anchors, feat_dim]
+                
+                # 计算特征与anchor的相似性
+                similarities = torch.mm(class_features, anchors.t())  # [N_class, num_anchors]
+                
+                # 使用最大相似性作为目标
+                max_similarities = torch.max(similarities, dim=1)[0]  # [N_class]
+                
+                # 计算损失（鼓励高相似性）
+                loss = torch.mean(1.0 - max_similarities)
+                total_loss = total_loss + loss
+                num_valid += 1
+    
+    if num_valid > 0:
+        return total_loss / num_valid
+    else:
+        return torch.tensor(0.0, device=device)
+
+def train_with_dfp(model, sampled_batch, optimizer, consistency_criterion, dice_loss, 
+                   dfp, iter_num, writer=None):
+    """使用DFP的训练函数"""
     model.train()
     volume_batch, label_batch, idx = sampled_batch['image'], sampled_batch['label'], sampled_batch['idx']
     volume_batch, label_batch, idx = volume_batch.cuda(), label_batch.cuda(), idx.cuda()
-
-    outputs_v, outputs_a, embedding_v, embedding_a, features_v, features_a = model(volume_batch, with_hcc=True)
+    
+    # 前向传播
+    outputs_v, outputs_a, embedding_v, embedding_a = model(volume_batch)
     outputs_list = [outputs_v, outputs_a]
     num_outputs = len(outputs_list)
 
-    # 确保张量在正确的设备上（GPU）
+    # 确保张量在正确的设备上
     device = volume_batch.device
     y_ori = torch.zeros((num_outputs,) + outputs_list[0].shape, device=device)
     y_pseudo_label = torch.zeros((num_outputs,) + outputs_list[0].shape, device=device)
 
+    # 监督损失
     loss_s = 0
     for i in range(num_outputs):
         y = outputs_list[i][:labeled_bs, ...]
@@ -172,178 +221,70 @@ def train_stage_one(model, sampled_batch, optimizer, consistency_criterion, dice
         y_ori[i] = y_prob_all
         y_pseudo_label[i] = sharpening(y_prob_all)
 
+    # 一致性损失
     loss_c = 0
     for i in range(num_outputs):
         for j in range(num_outputs):
             if i != j:
                 loss_c += consistency_criterion(y_ori[i], y_pseudo_label[j])
 
-    # HCC Loss
-    loss_hcc = hierarchical_coral(features_v, features_a, hcc_weights,
-                                cov_mode=args.cov_mode, 
-                                patch_size=args.patch_size,
-                                patch_strategy=args.hcc_patch_strategy,
-                                topk=args.hcc_topk,
-                                metric=args.hcc_metric,
-                                scale=args.hcc_scale)
+    # DFP相关损失
+    loss_anchor = torch.tensor(0.0, device=device)
+    if args.use_dfp and dfp is not None:
+        # 提取特征用于DFP更新
+        features_list, labels_list = extract_features_and_labels(volume_batch, label_batch, model, labeled_bs)
+        
+        # 更新DFP
+        dfp.update_labeled_features(features_list, labels_list)
+        
+        # 获取anchor特征
+        anchor_tensors = sample_anchors_from_dfp(dfp, args.num_eigenvectors)
+        
+        # 计算anchor损失
+        loss_anchor = compute_anchor_loss(features_list, labels_list, anchor_tensors, device)
 
+    # 计算总损失
     lambda_c = get_lambda_c(iter_num // 150)
-    total_loss = args.lamda * loss_s + lambda_c * loss_c + args.lambda_hcc * loss_hcc
+    lambda_d = get_lambda_d(iter_num // 150)
+    
+    total_loss = args.lamda * loss_s + lambda_c * loss_c + lambda_d * loss_anchor
 
-    # 添加特征到全局池（包含标签信息用于Two-Phase k-means）
-    if args.use_dfp and cov_dfp is not None:
-        # 获取标记样本的特征和标签
-        labeled_features_v = embedding_v[:args.labeled_bs, ...]
-        labeled_features_a = embedding_a[:args.labeled_bs, ...]
-        labeled_labels = label_batch[:args.labeled_bs, ...]  # [labeled_bs, H, W, D]
-        
-        # 转换格式：[batch, h, w, d, feat_dim]
-        labeled_features_v = labeled_features_v.permute(0, 2, 3, 4, 1).contiguous()
-        labeled_features_a = labeled_features_a.permute(0, 2, 3, 4, 1).contiguous()
-        
-        # 投影到特征空间
-        model.eval()
-        proj_labeled_features_v = model.projection_head1(labeled_features_v.view(-1, labeled_features_v.shape[-1]))
-        proj_labeled_features_a = model.projection_head2(labeled_features_a.view(-1, labeled_features_a.shape[-1]))
-        model.train()
-        
-        # 平均两个分支的特征
-        combined_features = (proj_labeled_features_v + proj_labeled_features_a) / 2
-        
-        # 准备对应的标签（展平到与特征相同的维度）
-        flattened_labels = labeled_labels.view(-1)  # [labeled_bs * H * W * D]
-        
-        # 只保留有效的像素位置（非背景，假设0是背景）
-        # 或者使用高置信度的预测作为伪标签
-        with torch.no_grad():
-            pred_probs = torch.softmax(outputs_v[:args.labeled_bs], dim=1)  # [labeled_bs, num_classes, H, W, D]
-            pred_confidence = torch.max(pred_probs, dim=1)[0]  # [labeled_bs, H, W, D]
-            pred_labels = torch.argmax(pred_probs, dim=1)  # [labeled_bs, H, W, D]
-            
-            # 使用高置信度区域 (置信度 > 0.9)
-            high_conf_mask = (pred_confidence > 0.9).view(-1)  # [labeled_bs * H * W * D]
-            
-            if high_conf_mask.any():
-                # 使用高置信度的预测作为标签
-                final_features = combined_features[high_conf_mask]
-                final_labels = pred_labels.view(-1)[high_conf_mask]
-                
-                # 添加到全局特征池（包含标签）
-                cov_dfp.add_to_global_pool(final_features, final_labels)
-            else:
-                # 如果没有高置信度预测，使用真实标签
-                cov_dfp.add_to_global_pool(combined_features, flattened_labels)
-
+    # 反向传播
     optimizer.zero_grad()
     total_loss.backward()
     optimizer.step()
 
     # 记录日志
-    logging.info('Stage 1 - Iteration %d : loss : %03f, loss_s: %03f, loss_c: %03f, loss_hcc: %03f' % (
-        iter_num, total_loss, loss_s, loss_c, loss_hcc))
+    logging.info('Iteration %d : loss : %03f, loss_s: %03f, loss_c: %03f, loss_anchor: %03f' % (
+        iter_num, total_loss, loss_s, loss_c, loss_anchor))
     
     return {
         'total_loss': total_loss.item(),
         'loss_s': loss_s.item(),
         'loss_c': loss_c.item(),
-        'loss_hcc': loss_hcc.item(),
-        'lambda_c': lambda_c
+        'loss_anchor': loss_anchor.item(),
+        'lambda_c': lambda_c,
+        'lambda_d': lambda_d
     }
 
-def train_stage_two_build_dfp(cov_dfp, max_optimization_iterations=50, learning_rate=0.01):
-    """阶段二：构建DFP并生成Selector训练目标 - 度量学习驱动"""
-    logging.info(f"Building DFPs with metric learning: max_iter={max_optimization_iterations}, lr={learning_rate}")
-    success = cov_dfp.build_dfps(max_optimization_iterations=max_optimization_iterations, 
-                                learning_rate=learning_rate)
-    if success:
-        stats = cov_dfp.get_statistics()
-        logging.info(f"Metric-learning driven DFP construction successful: {stats}")
-        return True
-    else:
-        logging.warning("DFP construction failed")
-        return False
-
-def train_stage_three_selector(model, sampled_batch, selector_optimizer, cov_dfp, iter_num):
-    """阶段三A：训练Selector"""
-    model.eval()  # 冻结主模型
-    volume_batch, label_batch, idx = sampled_batch['image'], sampled_batch['label'], sampled_batch['idx']
-    volume_batch, label_batch, idx = volume_batch.cuda(), label_batch.cuda(), idx.cuda()
-    
-    with torch.no_grad():
-        outputs_v, outputs_a, embedding_v, embedding_a = model(volume_batch)
-        
-        # 获取区域特征
-        labeled_features_v = embedding_v[:args.labeled_bs, ...]
-        labeled_features_a = embedding_a[:args.labeled_bs, ...]
-        
-        # 转换格式
-        labeled_features_v = labeled_features_v.permute(0, 2, 3, 4, 1).contiguous()
-        labeled_features_a = labeled_features_a.permute(0, 2, 3, 4, 1).contiguous()
-        
-        # 投影特征
-        proj_labeled_features_v = model.projection_head1(labeled_features_v.view(-1, labeled_features_v.shape[-1]))
-        proj_labeled_features_a = model.projection_head2(labeled_features_a.view(-1, labeled_features_a.shape[-1]))
-        
-        # 合并特征
-        combined_features = (proj_labeled_features_v + proj_labeled_features_a) / 2
-    
-    # 生成目标标签
-    target_labels = cov_dfp.get_dfp_target_labels(combined_features)
-    
-    # 训练Selector
-    model.train()
-    selector_logits = model.dfp_selector(combined_features)
-    selector_loss = F.cross_entropy(selector_logits, target_labels)
-    
-    selector_optimizer.zero_grad()
-    selector_loss.backward()
-    selector_optimizer.step()
-    
-    # 计算准确率
-    with torch.no_grad():
-        predicted = torch.argmax(selector_logits, dim=1)
-        accuracy = (predicted == target_labels).float().mean()
-    
-    logging.info(f'Stage 3A - Selector training iter {iter_num}: loss={selector_loss.item():.4f}, acc={accuracy.item():.4f}')
-    
-    return {
-        'selector_loss': selector_loss.item(),
-        'selector_accuracy': accuracy.item()
-    }
-
-def train_stage_three_main(model, sampled_batch, optimizer, consistency_criterion, dice_loss, 
-                          cov_dfp, iter_num, writer=None):
-    """阶段三B：主模型训练（使用Selector选择的DFP）"""
+def train_without_dfp(model, sampled_batch, optimizer, consistency_criterion, dice_loss, 
+                      iter_num, writer=None):
+    """不使用DFP的标准训练函数"""
     model.train()
     volume_batch, label_batch, idx = sampled_batch['image'], sampled_batch['label'], sampled_batch['idx']
     volume_batch, label_batch, idx = volume_batch.cuda(), label_batch.cuda(), idx.cuda()
 
-    # 获取区域特征用于Selector
-    with torch.no_grad():
-        temp_outputs_v, temp_outputs_a, temp_embedding_v, temp_embedding_a = model(volume_batch)
-        
-        labeled_features_v = temp_embedding_v[:args.labeled_bs, ...]
-        labeled_features_a = temp_embedding_a[:args.labeled_bs, ...]
-        
-        labeled_features_v = labeled_features_v.permute(0, 2, 3, 4, 1).contiguous()
-        labeled_features_a = labeled_features_a.permute(0, 2, 3, 4, 1).contiguous()
-        
-        proj_labeled_features_v = model.projection_head1(labeled_features_v.view(-1, labeled_features_v.shape[-1]))
-        proj_labeled_features_a = model.projection_head2(labeled_features_a.view(-1, labeled_features_a.shape[-1]))
-        
-        combined_features = (proj_labeled_features_v + proj_labeled_features_a) / 2
-        dfp_predictions = model.dfp_selector.predict_dfp(combined_features)
-
-    # 正常前向传播
-    outputs_v, outputs_a, embedding_v, embedding_a, features_v, features_a = model(volume_batch, with_hcc=True)
+    # 前向传播
+    outputs_v, outputs_a, embedding_v, embedding_a = model(volume_batch)
     outputs_list = [outputs_v, outputs_a]
     num_outputs = len(outputs_list)
 
-    # 确保张量在正确的设备上（GPU）
+    # 确保张量在正确的设备上
     device = volume_batch.device
     y_ori = torch.zeros((num_outputs,) + outputs_list[0].shape, device=device)
     y_pseudo_label = torch.zeros((num_outputs,) + outputs_list[0].shape, device=device)
 
+    # 监督损失
     loss_s = 0
     for i in range(num_outputs):
         y = outputs_list[i][:labeled_bs, ...]
@@ -355,84 +296,30 @@ def train_stage_three_main(model, sampled_batch, optimizer, consistency_criterio
         y_ori[i] = y_prob_all
         y_pseudo_label[i] = sharpening(y_prob_all)
 
+    # 一致性损失
     loss_c = 0
     for i in range(num_outputs):
         for j in range(num_outputs):
             if i != j:
                 loss_c += consistency_criterion(y_ori[i], y_pseudo_label[j])
 
-    # HCC Loss
-    loss_hcc = hierarchical_coral(features_v, features_a, hcc_weights,
-                                cov_mode=args.cov_mode, 
-                                patch_size=args.patch_size,
-                                patch_strategy=args.hcc_patch_strategy,
-                                topk=args.hcc_topk,
-                                metric=args.hcc_metric,
-                                scale=args.hcc_scale)
-
-    # 度量学习损失 (新增) - 修复初始化问题
-    loss_compact = torch.tensor(0.0, device=device)
-    loss_separate = torch.tensor(0.0, device=device)
-    
-    if args.use_dfp and cov_dfp is not None and cov_dfp.dfps_built:
-        # 获取区域特征用于度量学习损失计算
-        region_features_v = embedding_v[:args.labeled_bs, ...]
-        region_features_a = embedding_a[:args.labeled_bs, ...]
-        
-        # 转换格式并投影
-        region_features_v = region_features_v.permute(0, 2, 3, 4, 1).contiguous()
-        region_features_a = region_features_a.permute(0, 2, 3, 4, 1).contiguous()
-        
-        # 获取投影特征（需要暂时切换到eval模式）
-        model.eval()
-        proj_region_features_v = model.projection_head1(region_features_v.view(-1, region_features_v.shape[-1]))
-        proj_region_features_a = model.projection_head2(region_features_a.view(-1, region_features_a.shape[-1]))
-        model.train()
-        
-        # 平均两个分支的特征
-        combined_region_features = (proj_region_features_v + proj_region_features_a) / 2  # [N, D]
-        
-        # 使用Selector预测DFP分配
-        with torch.no_grad():
-            dfp_predictions = model.dfp_selector.predict_dfp(combined_region_features)  # [N]
-        
-        # 按DFP分组特征
-        batch_features_by_dfp = cov_dfp.group_features_by_dfp_predictions(
-            combined_region_features, dfp_predictions
-        )
-        
-        # 计算度量学习损失
-        loss_compact, loss_separate = cov_dfp.compute_metric_learning_losses(
-            batch_features_by_dfp, margin=args.separation_margin
-        )
-
+    # 计算总损失
     lambda_c = get_lambda_c(iter_num // 150)
-    total_loss = (args.lamda * loss_s + 
-                  lambda_c * loss_c + 
-                  args.lambda_hcc * loss_hcc + 
-                  args.lambda_compact * loss_compact + 
-                  args.lambda_separate * loss_separate)
+    total_loss = args.lamda * loss_s + lambda_c * loss_c
 
+    # 反向传播
     optimizer.zero_grad()
     total_loss.backward()
     optimizer.step()
 
-    # 在反向传播后更新DFPs
-    with torch.no_grad():
-        cov_dfp.update_dfps_with_batch_features(batch_features_by_dfp, 
-                                               update_rate=0.1, 
-                                               max_dfp_size=1000)
-
-    logging.info('Stage 3B - Main training iter %d : loss : %03f, loss_s: %03f, loss_c: %03f, loss_hcc: %03f, loss_compact: %03f, loss_separate: %03f' % (
-        iter_num, total_loss, loss_s, loss_c, loss_hcc, loss_compact, loss_separate))
+    # 记录日志
+    logging.info('Iteration %d : loss : %03f, loss_s: %03f, loss_c: %03f' % (
+        iter_num, total_loss, loss_s, loss_c))
     
     return {
         'total_loss': total_loss.item(),
         'loss_s': loss_s.item(),
         'loss_c': loss_c.item(),
-        'loss_hcc': loss_hcc.item(),
-        'loss_compact': loss_compact.item(),
-        'loss_separate': loss_separate.item(),
         'lambda_c': lambda_c
     }
 
@@ -454,14 +341,14 @@ if __name__ == "__main__":
             project=args.wandb_project,
             entity=args.wandb_entity,
             config=vars(args),
-            name=f"{args.exp}_{args.model}_dfp{args.num_dfp}_feat{args.embedding_dim}_compact{args.lambda_compact}_separate{args.lambda_separate}",
-            tags=[args.dataset_name, "cov_dfp", f"dfp_{args.num_dfp}", "metric_learning"]
+            name=f"{args.exp}_{args.model}_feat{args.embedding_dim}_dfp{args.use_dfp}",
+            tags=[args.dataset_name, "corn_dfp", f"feat_{args.embedding_dim}"]
         )
         logging.info(f"Wandb initialized with project: {args.wandb_project}")
 
     # 创建模型
     model = net_factory(net_type=args.model, in_chns=1, class_num=num_classes, mode="train", 
-                       feat_dim=args.embedding_dim, num_dfp=args.num_dfp, use_selector=True)
+                       feat_dim=args.embedding_dim)
     
     # 移动模型到GPU
     if torch.cuda.is_available():
@@ -470,25 +357,18 @@ if __name__ == "__main__":
     else:
         logging.warning("CUDA not available, using CPU")
 
-    # 创建协方差DFP (指定GPU设备)
-    cov_dfp = None
+    # 创建动态特征池
+    dfp = None
     if args.use_dfp:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        cov_dfp = CovarianceDynamicFeaturePool(
-            feature_dim=args.embedding_dim,
-            num_dfp=args.num_dfp,
-            max_global_features=args.max_global_features,
+        dfp = DynamicFeaturePool(
+            num_labeled_samples=args.labelnum,
+            num_cls=num_classes,
+            max_store=args.max_store,
+            ema_alpha=args.ema_alpha,
             device=device
         )
-        
-        # 启用Two-Phase k-means模式（推荐）
-        cov_dfp.enable_two_phase_kmeans(
-            num_classes=num_classes,  # 2 for binary segmentation
-            prototypes_per_class=None  # 自动平均分配
-        )
-        
-        logging.info(f"CovarianceDynamicFeaturePool created on device: {device}")
-        logging.info(f"Two-Phase k-means enabled with {num_classes} classes")
+        logging.info(f"DynamicFeaturePool created on {device} with max_store={args.max_store}, ema_alpha={args.ema_alpha}")
 
     # 创建数据加载器
     if args.dataset_name == "LA":
@@ -514,12 +394,6 @@ if __name__ == "__main__":
 
     # 创建优化器
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
-    
-    # Selector单独的优化器
-    selector_optimizer = None
-    if args.use_dfp:
-        selector_params = list(model.dfp_selector.parameters())
-        selector_optimizer = optim.Adam(selector_params, lr=0.001, weight_decay=0.0001)
 
     # 初始化tensorboard writer
     writer = SummaryWriter(snapshot_path + '/log') if not args.use_wandb else None
@@ -532,163 +406,53 @@ if __name__ == "__main__":
     max_epoch = max_iterations // len(trainloader) + 1
     lr_ = base_lr
     
-    # 训练状态
-    dfps_built = False
-    selector_trained = False  # selector是否已训练好
-    selector_train_counter = 0
-    last_dfp_reconstruct_iter = 0  # 上次DFP重构的迭代数
-    
     iterator = tqdm(range(max_epoch), ncols=70)
     for epoch_num in iterator:
         for i_batch, sampled_batch in enumerate(trainloader):
             iter_num += 1
             
-            # 阶段判断
-            if iter_num < args.dfp_start_iter:
-                # 阶段一：初始预训练
-                metrics = train_stage_one(model, sampled_batch, optimizer, consistency_criterion, 
-                                        dice_loss, cov_dfp, iter_num, writer)
-                
-                # 记录指标
-                if args.use_wandb:
-                    wandb.log({
-                        'stage': 1,
-                        'train/loss': metrics['total_loss'],
-                        'train/loss_supervised': metrics['loss_s'],
-                        'train/loss_consistency': metrics['loss_c'],
-                        'train/loss_hcc': metrics['loss_hcc'],
-                        'train/lambda_c': metrics['lambda_c'],
-                        'iteration': iter_num
-                    })
-                    
-                    if args.use_dfp and cov_dfp is not None:
-                        stats = cov_dfp.get_statistics()
-                        wandb.log({
-                            'dfp/global_pool_size': stats['global_pool_size'],
-                            'iteration': iter_num
-                        })
+            # 学习率调整
+            if iter_num % 2500 == 0:
+                lr_ = base_lr * 0.1 ** (iter_num // 2500)
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = lr_
             
-            elif iter_num == args.dfp_start_iter and args.use_dfp:
-                # 阶段二：构建DFP
-                logging.info("Starting Stage 2: Building DFPs...")
-                dfps_built = train_stage_two_build_dfp(cov_dfp)
-                last_dfp_reconstruct_iter = iter_num
-                
-                if dfps_built:
-                    stats = cov_dfp.get_statistics()
-                    logging.info("DFP construction completed, starting selector training...")
-                    selector_trained = False  # 需要重新训练selector
-                    selector_train_counter = 0  # 重置selector计数器
-                    
-                    if args.use_wandb:
-                        wandb.log({
-                            'stage': 2,
-                            'dfp/dfps_built': True,
-                            'dfp/min_dfp_size': stats['min_dfp_size'],
-                            'dfp/max_dfp_size': stats['max_dfp_size'],
-                            'dfp/mean_dfp_size': stats['mean_dfp_size'],
-                            'selector_trained': selector_trained,
-                            'iteration': iter_num
-                        })
-                
-                # 构建DFP后，开始训练selector
-                if dfps_built:
-                    logging.info(f"Stage 3A - Starting Selector Training: counter={selector_train_counter}/{args.selector_train_iter}")
-                    selector_metrics = train_stage_three_selector(model, sampled_batch, selector_optimizer, 
-                                                                cov_dfp, iter_num)
-                    selector_train_counter += 1
-                    
-                    if args.use_wandb:
-                        wandb.log({
-                            'stage': 3,
-                            'submode': 'selector',
-                            'selector/loss': selector_metrics['selector_loss'],
-                            'selector/accuracy': selector_metrics['selector_accuracy'],
-                            'selector_train_counter': selector_train_counter,
-                            'selector_trained': selector_trained,
-                            'iteration': iter_num
-                        })
+            # 训练
+            if args.use_dfp:
+                metrics = train_with_dfp(model, sampled_batch, optimizer, consistency_criterion, 
+                                       dice_loss, dfp, iter_num, writer)
+            else:
+                metrics = train_without_dfp(model, sampled_batch, optimizer, consistency_criterion, 
+                                          dice_loss, iter_num, writer)
             
-            elif iter_num > args.dfp_start_iter and args.use_dfp and dfps_built:
-                # 阶段三：循环训练
+            # 记录指标
+            if args.use_wandb:
+                log_dict = {
+                    'train/loss': metrics['total_loss'],
+                    'train/loss_supervised': metrics['loss_s'],
+                    'train/loss_consistency': metrics['loss_c'],
+                    'train/lambda_c': metrics['lambda_c'],
+                    'train/lr': lr_,
+                    'iteration': iter_num
+                }
                 
-                # 检查是否需要重构DFP
-                if iter_num - last_dfp_reconstruct_iter >= args.dfp_reconstruct_interval:
-                    logging.info(f"Reconstructing DFPs at iteration {iter_num}...")
-                    cov_dfp.reconstruct_dfps()
-                    last_dfp_reconstruct_iter = iter_num
-                    selector_trained = False  # 需要重新训练selector
-                    selector_train_counter = 0  # 重置selector计数器
-                    logging.info("DFP reconstructed, selector needs retraining")
-                    
-                    if args.use_wandb:
-                        wandb.log({
-                            'stage': 3,
-                            'submode': 'dfp_reconstruct',
-                            'dfp_reconstructed': True,
-                            'selector_trained': selector_trained,
-                            'iteration': iter_num
-                        })
-                
-                # 训练逻辑
-                if not selector_trained:
-                    # 阶段3A：训练Selector直到收敛
-                    if selector_train_counter < args.selector_train_iter:
-                        logging.info(f"Stage 3A - Training Selector: counter={selector_train_counter}/{args.selector_train_iter}")
-                        selector_metrics = train_stage_three_selector(model, sampled_batch, selector_optimizer, 
-                                                                    cov_dfp, iter_num)
-                        selector_train_counter += 1
-                        
-                        # 检查是否完成selector训练
-                        if selector_train_counter >= args.selector_train_iter:
-                            selector_trained = True
-                            logging.info(f"Selector training completed! Switching to main model training.")
-                        
-                        if args.use_wandb:
-                            wandb.log({
-                                'stage': 3,
-                                'submode': 'selector',
-                                'selector/loss': selector_metrics['selector_loss'],
-                                'selector/accuracy': selector_metrics['selector_accuracy'],
-                                'selector_train_counter': selector_train_counter,
-                                'selector_trained': selector_trained,
-                                'iteration': iter_num
-                            })
-                else:
-                    # 阶段3B：使用训练好的selector进行主模型训练
-                    logging.info(f"Stage 3B - Training Main Model with trained selector")
-                    metrics = train_stage_three_main(model, sampled_batch, optimizer, consistency_criterion, 
-                                                   dice_loss, cov_dfp, iter_num, writer)
-                    
-                    if args.use_wandb:
-                        wandb.log({
-                            'stage': 3,
-                            'submode': 'main',
-                            'train/loss': metrics['total_loss'],
-                            'train/loss_supervised': metrics['loss_s'],
-                            'train/loss_consistency': metrics['loss_c'],
-                            'train/loss_hcc': metrics['loss_hcc'],
-                            'train/loss_compact': metrics['loss_compact'],
-                            'train/loss_separate': metrics['loss_separate'],
-                            'train/lambda_compact': args.lambda_compact,
-                            'train/lambda_separate': args.lambda_separate,
-                            'selector_trained': selector_trained,
-                            'iteration': iter_num
-                        })
-                    
-            elif not args.use_dfp:
-                # 不使用DFP时的标准训练
-                metrics = train_stage_one(model, sampled_batch, optimizer, consistency_criterion, 
-                                        dice_loss, None, iter_num, writer)
-                
-                if args.use_wandb:
-                    wandb.log({
-                        'train/loss': metrics['total_loss'],
-                        'train/loss_supervised': metrics['loss_s'],
-                        'train/loss_consistency': metrics['loss_c'],
-                        'train/loss_hcc': metrics['loss_hcc'],
-                        'iteration': iter_num
+                if args.use_dfp:
+                    log_dict.update({
+                        'train/loss_anchor': metrics['loss_anchor'],
+                        'train/lambda_d': metrics['lambda_d']
                     })
+                
+                wandb.log(log_dict)
+            else:
+                writer.add_scalar('train/loss', metrics['total_loss'], iter_num)
+                writer.add_scalar('train/loss_supervised', metrics['loss_s'], iter_num)
+                writer.add_scalar('train/loss_consistency', metrics['loss_c'], iter_num)
+                writer.add_scalar('train/lambda_c', metrics['lambda_c'], iter_num)
+                writer.add_scalar('train/lr', lr_, iter_num)
+                
+                if args.use_dfp:
+                    writer.add_scalar('train/loss_anchor', metrics['loss_anchor'], iter_num)
+                    writer.add_scalar('train/lambda_d', metrics['lambda_d'], iter_num)
 
             # 验证和保存模型
             if iter_num >= 1000 and iter_num % 500 == 0:
@@ -714,8 +478,8 @@ if __name__ == "__main__":
                         'iteration': iter_num
                     })
                 else:
-                    writer.add_scalar('Var_dice/Dice', dice_sample, iter_num)
-                    writer.add_scalar('Var_dice/Best_dice', best_dice, iter_num)
+                    writer.add_scalar('val/dice', dice_sample, iter_num)
+                    writer.add_scalar('val/best_dice', best_dice, iter_num)
                 
                 model.train()
 

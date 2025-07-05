@@ -1,6 +1,5 @@
 import torch
 from torch import nn
-from .selector_network import create_selector
 
 
 class ConvBlock(nn.Module):
@@ -241,15 +240,13 @@ class VNet(nn.Module):
 
 class corf(nn.Module):
     """
-    CORF with DFP Selector
+    CORF: Correlation-based Feature Alignment
     """
     def __init__(self, n_channels=3, n_classes=2, n_filters=16, normalization='none', has_dropout=False,
-                 has_residual=False, feat_dim=32, num_dfp=8, use_selector=True):
+                 has_residual=False, feat_dim=32, **kwargs):
         super(corf, self).__init__()
         self.n_filters = n_filters
         self.feat_dim = feat_dim
-        self.num_dfp = num_dfp
-        self.use_selector = use_selector
         
         self.encoder1 = Encoder(n_channels, n_classes, n_filters, normalization, has_dropout, has_residual)
         self.encoder2 = Encoder(n_channels, n_classes, n_filters, normalization, has_dropout, has_residual,)
@@ -279,48 +276,18 @@ class corf(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(feat_dim, feat_dim)
         )
-        
-        # DFP Selector网络
-        if self.use_selector:
-            self.dfp_selector = create_selector(
-                selector_type="simple",
-                feature_dim=feat_dim,
-                num_dfp=num_dfp,
-                hidden_dim=128,
-                dropout=0.1
-            )
 
-    def forward(self, input, with_hcc=False, with_selector=False, region_features=None):
+    def forward(self, input, with_hcc=False):
         features1 = self.encoder1(input)
         features2 = self.encoder2(input)
         out_seg1, embedding1 = self.decoder1(features1, with_feature=True)
         out_seg2, embedding2 = self.decoder2(features2, with_feature=True)
         
-        output_dict = {
-            'seg1': out_seg1,
-            'seg2': out_seg2,
-            'embedding1': embedding1,
-            'embedding2': embedding2
-        }
-        
+        # 为了保持向后兼容性，根据参数返回不同格式
         if with_hcc:
-            output_dict['features1'] = features1
-            output_dict['features2'] = features2
-        
-        if with_selector and self.use_selector and region_features is not None:
-            # 使用Selector预测DFP选择
-            selector_logits = self.dfp_selector(region_features)
-            dfp_predictions = torch.argmax(selector_logits, dim=-1)
-            output_dict['selector_logits'] = selector_logits
-            output_dict['dfp_predictions'] = dfp_predictions
-        
-        # 为了保持向后兼容性，如果没有特殊要求，返回原始格式
-        if not with_hcc and not with_selector:
-            return out_seg1, out_seg2, embedding1, embedding2
-        elif with_hcc and not with_selector:
             return out_seg1, out_seg2, embedding1, embedding2, features1, features2
         else:
-            return output_dict
+            return out_seg1, out_seg2, embedding1, embedding2
     
 
 class ConvBlock2D(nn.Module):
@@ -552,12 +519,10 @@ class corf2d(nn.Module):
     CORF 2D版本，使用2D卷积，适用于2D医学图像分割
     """
     def __init__(self, n_channels=1, n_classes=2, n_filters=16, normalization='none', has_dropout=False,
-                 has_residual=False, feat_dim=32, num_dfp=8, use_selector=True):
+                 has_residual=False, feat_dim=32, **kwargs):
         super(corf2d, self).__init__()
         self.n_filters = n_filters
         self.feat_dim = feat_dim
-        self.num_dfp = num_dfp
-        self.use_selector = use_selector
         
         self.encoder1 = Encoder2D(n_channels, n_classes, n_filters, normalization, has_dropout, has_residual)
         self.encoder2 = Encoder2D(n_channels, n_classes, n_filters, normalization, has_dropout, has_residual)
@@ -588,46 +553,16 @@ class corf2d(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(feat_dim, feat_dim)
         )
-        
-        # DFP Selector网络
-        if self.use_selector:
-            self.dfp_selector = create_selector(
-                selector_type="simple",
-                feature_dim=feat_dim,
-                num_dfp=num_dfp,
-                hidden_dim=128,
-                dropout=0.1
-            )
 
-    def forward(self, input, with_hcc=False, with_selector=False, region_features=None):
+    def forward(self, input, with_hcc=False):
         features1 = self.encoder1(input)
         features2 = self.encoder2(input)
         out_seg1, embedding1 = self.decoder1(features1, with_feature=True)
         out_seg2, embedding2 = self.decoder2(features2, with_feature=True)
         
-        output_dict = {
-            'seg1': out_seg1,
-            'seg2': out_seg2,
-            'embedding1': embedding1,
-            'embedding2': embedding2
-        }
-        
+        # 为了保持向后兼容性，根据参数返回不同格式
         if with_hcc:
-            output_dict['features1'] = features1
-            output_dict['features2'] = features2
-        
-        if with_selector and self.use_selector and region_features is not None:
-            # 使用Selector预测DFP选择
-            selector_logits = self.dfp_selector(region_features)
-            dfp_predictions = torch.argmax(selector_logits, dim=-1)
-            output_dict['selector_logits'] = selector_logits
-            output_dict['dfp_predictions'] = dfp_predictions
-        
-        # 为了保持向后兼容性，如果没有特殊要求，返回原始格式
-        if not with_hcc and not with_selector:
-            return out_seg1, out_seg2, embedding1, embedding2
-        elif with_hcc and not with_selector:
             return out_seg1, out_seg2, embedding1, embedding2, features1, features2
         else:
-            return output_dict
+            return out_seg1, out_seg2, embedding1, embedding2
     
