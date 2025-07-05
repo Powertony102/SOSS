@@ -170,7 +170,6 @@ def example_usage():
         # Simulate total loss (combine with other losses)
         dice_loss = torch.randn(1, device=device, requires_grad=True)
         consistency_loss = torch.randn(1, device=device, requires_grad=True)
-        
         total_loss = dice_loss + 0.1 * consistency_loss + 0.5 * proto_losses['total']
         
         # Print total loss (detached) BEFORE backward
@@ -180,7 +179,7 @@ def example_usage():
         total_loss.backward()
         print(f"  Gradients computed successfully")
         
-        # Show prototype statistics every few epochs
+        # Show prototype statistics every few epochs (all values detached)
         if (epoch + 1) % 2 == 0:
             stats = proto_mem.get_prototype_statistics()
             num_init = int(stats['num_initialized'])
