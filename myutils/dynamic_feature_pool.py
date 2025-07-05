@@ -102,8 +102,11 @@ class DynamicFeaturePool:
             idx = torch.argsort(eigvals, descending=True)
             k = min(num_eigenvectors, D)
             top_vecs = eigvecs[:, idx[:k]].t()  # [k, D] GPU张量
+            
+            # L2归一化anchor向量
+            top_vecs_norm = torch.nn.functional.normalize(top_vecs, p=2, dim=1)
 
-            anchor_list.append(top_vecs)
+            anchor_list.append(top_vecs_norm)
 
         return anchor_list
 

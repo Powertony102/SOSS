@@ -155,7 +155,7 @@ def sample_anchors_from_dfp(dfp, num_eigenvectors=8):
     return anchor_tensors
 
 def compute_anchor_loss(features_list, labels_list, anchor_tensors, device):
-    """计算anchor相似性损失（GPU版本）"""
+    """计算anchor相似性损失（GPU版本）- 修复版本"""
     total_loss = torch.tensor(0.0, device=device)
     num_valid = 0
     
@@ -176,14 +176,21 @@ def compute_anchor_loss(features_list, labels_list, anchor_tensors, device):
             if anchor_tensors[class_id] is not None:
                 anchors = anchor_tensors[class_id].to(device)  # [num_anchors, feat_dim]
                 
-                # 计算特征与anchor的相似性
-                similarities = torch.mm(class_features, anchors.t())  # [N_class, num_anchors]
+                # L2归一化特征和anchor
+                class_features_norm = torch.nn.functional.normalize(class_features, p=2, dim=1)
+                anchors_norm = torch.nn.functional.normalize(anchors, p=2, dim=1)
+                
+                # 计算余弦相似性（归一化后的内积）
+                similarities = torch.mm(class_features_norm, anchors_norm.t())  # [N_class, num_anchors]
                 
                 # 使用最大相似性作为目标
                 max_similarities = torch.max(similarities, dim=1)[0]  # [N_class]
                 
-                # 计算损失（鼓励高相似性）
-                loss = torch.mean(1.0 - max_similarities)
+                # 计算损失（鼓励高相似性）- 使用余弦距离
+                # 余弦距离 = 1 - 余弦相似性，范围在[0, 2]
+                cosine_distance = 1.0 - max_similarities
+                loss = torch.mean(cosine_distance)
+                
                 total_loss = total_loss + loss
                 num_valid += 1
     
