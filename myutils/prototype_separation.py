@@ -69,20 +69,27 @@ class PrototypeMemory(nn.Module):
         self.register_buffer('update_count', torch.zeros(num_classes, dtype=torch.long))
         
     def _initialize_prototype_buffers(self):
-        """初始化原型相关的buffer"""
-        # Register prototype buffers - shape: (num_classes, feat_dim)
-        # Note: class 0 is background, so we store prototypes for classes 1 to num_classes
-        self.register_buffer('prototypes', torch.zeros(self.num_classes, self.feat_dim))
-        self.register_buffer('prototype_initialized', torch.zeros(self.num_classes, dtype=torch.bool))
-        self.register_buffer('last_update_epoch', torch.tensor(-1, dtype=torch.long))
-        self.register_buffer('_buffers_initialized', torch.tensor(True, dtype=torch.bool))
+        """初始化原型相关的buffer，确保在 self.device 上"""
+        device = torch.device(self.device) if isinstance(self.device, str) else self.device
+        self.register_buffer('prototypes', torch.zeros(self.num_classes, self.feat_dim, device=device))
+        self.register_buffer('prototype_initialized', torch.zeros(self.num_classes, dtype=torch.bool, device=device))
+        self.register_buffer('last_update_epoch', torch.tensor(-1, dtype=torch.long, device=device))
+        self.register_buffer('_buffers_initialized', torch.tensor(True, dtype=torch.bool, device=device))
     
     def _ensure_buffers_initialized(self, feat_dim: int):
-        """确保原型buffers已初始化，如果未初始化则根据输入特征维度初始化"""
+        """确保原型buffers已初始化，如果未初始化则根据输入特征维度初始化，并迁移到输入特征设备"""
         if not hasattr(self, '_buffers_initialized') or not self._buffers_initialized:
             self.feat_dim = feat_dim
             self._initialize_prototype_buffers()
             logging.info(f"PrototypeMemory: 动态推断特征维度为 {feat_dim}")
+        # 保证所有 buffer 在输入特征同设备
+        for name in ['prototypes', 'prototype_initialized', 'last_update_epoch', 'update_count', '_buffers_initialized']:
+            buf = getattr(self, name, None)
+            if buf is not None:
+                device = buf.device
+                target_device = torch.device(self.device) if isinstance(self.device, str) else self.device
+                if device != target_device:
+                    setattr(self, name, buf.to(target_device))
     
     def _get_high_confidence_mask(
         self, 
@@ -167,16 +174,10 @@ class PrototypeMemory(nn.Module):
     ) -> None:
         """
         Initialize prototypes using high-confidence features.
-        
-        Args:
-            features: (N, C) flattened features
-            labels: (N,) flattened labels (optional)
-            preds: (N, K) flattened predictions
-            mask: (N,) high-confidence mask
+        保证所有原型操作在 features.device 上
         """
         if not mask.any():
             return
-        
         actual_feat_dim = features.shape[-1]
         expected_feat_dim = self.prototypes.shape[1]
         if actual_feat_dim != expected_feat_dim:
@@ -185,21 +186,24 @@ class PrototypeMemory(nn.Module):
                 f"原型内存期望维度: {expected_feat_dim}. "
                 f"请检查PrototypeMemory初始化时的feat_dim参数是否与模型输出特征维度一致。"
             )
-            
+        # 保证 prototypes buffer 在 features.device
+        if self.prototypes.device != features.device:
+            self.prototypes = self.prototypes.to(features.device)
+            self.prototype_initialized = self.prototype_initialized.to(features.device)
+            self.last_update_epoch = self.last_update_epoch.to(features.device)
+            self.update_count = self.update_count.to(features.device)
         # Get predicted classes for high-confidence pixels
         _, pred_classes = torch.max(preds[mask], dim=1)  # (M,) where M = mask.sum()
         conf_features = features[mask]  # (M, C)
-        
-        # Initialize prototypes for each class
         for class_idx in range(1, self.num_classes + 1):  # Skip background (class 0)
             class_mask = (pred_classes == class_idx)
-            
             if class_mask.any():
-                # Use mean of high-confidence features for this class
                 class_features = conf_features[class_mask]  # (N_c, C)
-                self.prototypes[class_idx - 1] = torch.mean(class_features, dim=0)
+                # 明确迁移到同设备
+                mean_proto = torch.mean(class_features, dim=0)
+                self.prototypes[class_idx - 1] = mean_proto.to(self.prototypes.device)
                 self.prototype_initialized[class_idx - 1] = True
-                
+                assert self.prototypes[class_idx - 1].device == class_features.device, '原型与特征设备不一致'
                 logging.debug(f"Initialized prototype for class {class_idx} with "
                             f"{class_mask.sum().item()} features")
     
@@ -212,41 +216,33 @@ class PrototypeMemory(nn.Module):
     ) -> None:
         """
         Update prototypes using exponential moving average.
-        
-        Args:
-            features: (N, C) flattened features
-            labels: (N,) flattened labels (optional)
-            preds: (N, K) flattened predictions
-            mask: (N,) high-confidence mask
+        保证所有原型操作在 features.device 上
         """
         if not mask.any():
             return
-            
-        # Get predicted classes for high-confidence pixels
+        if self.prototypes.device != features.device:
+            self.prototypes = self.prototypes.to(features.device)
+            self.prototype_initialized = self.prototype_initialized.to(features.device)
+            self.last_update_epoch = self.last_update_epoch.to(features.device)
+            self.update_count = self.update_count.to(features.device)
         _, pred_classes = torch.max(preds[mask], dim=1)
         conf_features = features[mask]
-        
-        # Update prototypes for each class
         for class_idx in range(1, self.num_classes + 1):
             class_mask = (pred_classes == class_idx)
-            
             if class_mask.any():
-                # Compute new prototype from current batch
                 class_features = conf_features[class_mask]
                 new_prototype = torch.mean(class_features, dim=0)
-                
+                new_prototype = new_prototype.to(self.prototypes.device)
                 if self.prototype_initialized[class_idx - 1]:
-                    # Exponential moving average update
                     old_prototype = self.prototypes[class_idx - 1]
                     self.prototypes[class_idx - 1] = (
                         self.proto_momentum * old_prototype + 
                         (1 - self.proto_momentum) * new_prototype
                     )
                 else:
-                    # First initialization
                     self.prototypes[class_idx - 1] = new_prototype
                     self.prototype_initialized[class_idx - 1] = True
-                    
+                assert self.prototypes[class_idx - 1].device == class_features.device, '原型与特征设备不一致'
                 self.update_count[class_idx - 1] += 1
     
     def compute_intra_class_loss(
@@ -257,46 +253,33 @@ class PrototypeMemory(nn.Module):
     ) -> torch.Tensor:
         """
         Compute intra-class compactness loss: L_intra = mean(|f_i - μ_{y_i}|^2)
-        
-        Args:
-            features: (N, C) flattened features
-            preds: (N, K) flattened predictions
-            mask: (N,) high-confidence mask
-            
-        Returns:
-            loss_intra: scalar tensor
+        保证所有原型操作在 features.device 上
         """
         if not mask.any():
-            return torch.tensor(0.0, device=self.device, requires_grad=True)
-            
-        # Get predicted classes and features for high-confidence pixels
+            return torch.tensor(0.0, device=features.device, requires_grad=True)
+        if self.prototypes.device != features.device:
+            self.prototypes = self.prototypes.to(features.device)
         _, pred_classes = torch.max(preds[mask], dim=1)  # (M,)
         conf_features = features[mask]  # (M, C)
-        
         total_loss = 0.0
         valid_pixels = 0
-        
         for class_idx in range(1, self.num_classes + 1):
             if not self.prototype_initialized[class_idx - 1]:
                 continue
-                
             class_mask = (pred_classes == class_idx)
             if not class_mask.any():
                 continue
-                
-            # Get features for this class
             class_features = conf_features[class_mask]  # (N_c, C)
-            prototype = self.prototypes[class_idx - 1]  # (C,)
-            
-            # Compute squared L2 distance to prototype
+            prototype = self.prototypes[class_idx - 1]
+            prototype = prototype.to(class_features.device)
+            assert prototype.device == class_features.device, '原型与特征设备不一致'
             distances = torch.norm(class_features - prototype.unsqueeze(0), p=2, dim=1) ** 2
             total_loss += torch.sum(distances)
             valid_pixels += class_features.shape[0]
-            
         if valid_pixels > 0:
             return total_loss / valid_pixels
         else:
-            return torch.tensor(0.0, device=self.device, requires_grad=True)
+            return torch.tensor(0.0, device=features.device, requires_grad=True)
     
     def compute_inter_class_loss(self) -> torch.Tensor:
         """
@@ -348,50 +331,36 @@ class PrototypeMemory(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass to compute prototype-based losses.
-        
-        Args:
-            feat: (B, C, H, W, D) decoder features
-            label: (B, 1, H, W, D) ground truth labels (None for unlabelled)
-            pred: (B, K, H, W, D) softmax predictions
-            is_labelled: (B,) boolean mask indicating labelled samples
-            epoch_idx: current epoch index for update scheduling
-            
-        Returns:
-            loss_dict: Dictionary containing 'intra', 'inter', and 'total' losses
+        保证所有 buffer 在 feat.device 上
         """
+        self.device = feat.device  # 动态更新 self.device
         self._ensure_buffers_initialized(feat.shape[1])
-        
+        # 保证所有 buffer 在输入特征同设备
+        for name in ['prototypes', 'prototype_initialized', 'last_update_epoch', 'update_count', '_buffers_initialized']:
+            buf = getattr(self, name, None)
+            if buf is not None and buf.device != feat.device:
+                setattr(self, name, buf.to(feat.device))
         # Flatten spatial dimensions
         feat_flat, pred_flat, label_flat, is_labelled_flat = self._flatten_spatial_dims(
             feat, pred, label, is_labelled
         )
-        
         # Generate high-confidence mask
         conf_mask = self._get_high_confidence_mask(pred_flat, label_flat, is_labelled_flat)
-        
         # Update prototypes if needed
         should_update = True
         if epoch_idx is not None and self.update_interval > 1:
             should_update = (epoch_idx % self.update_interval == 0)
-            
         if should_update and conf_mask.any():
             if not self.prototype_initialized.any():
-                # Initial prototype computation
                 self.init_prototypes(feat_flat, label_flat, pred_flat, conf_mask)
             else:
-                # Update existing prototypes
                 self.update_prototypes(feat_flat, label_flat, pred_flat, conf_mask)
-                
             if epoch_idx is not None:
                 self.last_update_epoch.fill_(epoch_idx)
-        
         # Compute losses
         loss_intra = self.compute_intra_class_loss(feat_flat, pred_flat, conf_mask)
         loss_inter = self.compute_inter_class_loss()
-        
-        # Combine losses
         total_loss = self.lambda_intra * loss_intra + self.lambda_inter * loss_inter
-        
         return {
             'intra': loss_intra,
             'inter': loss_inter,
