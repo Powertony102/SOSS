@@ -88,16 +88,27 @@ def test_prototype_memory():
     # Test multiple epochs
     print(f"\nMulti-epoch test:")
     for epoch in range(1, 4):
+        # 为每个epoch创建完全独立的测试数据
+        torch.manual_seed(100 + epoch)  # 每个epoch不同的随机种子
         with torch.no_grad():
-            # Create new test data
+            # 创建全新的独立张量
             feat_new = torch.randn(batch_size, feat_dim, H, W, D, device=device)
             logits_new = torch.randn(batch_size, K, H, W, D, device=device)
             pred_new = torch.softmax(logits_new, dim=1)
+            label_new = torch.randint(0, K, (batch_size, 1, H, W, D), device=device)
+            is_labelled_new = torch.tensor([True, False], device=device)
             
-            loss_dict_new = proto_mem(feat_new, label, pred_new, is_labelled, epoch_idx=epoch)
-            print(f"  Epoch {epoch} - total_loss: {loss_dict_new['total'].detach().item():.6f}, "
-                  f"n_confident: {loss_dict_new['n_confident_pixels']}, "
-                  f"n_protos: {loss_dict_new['n_initialized_protos']}")
+            loss_dict_new = proto_mem(feat_new, label_new, pred_new, is_labelled_new, epoch_idx=epoch)
+            total_loss_val = loss_dict_new['total'].detach().item()
+            n_confident = int(loss_dict_new['n_confident_pixels'])
+            n_protos = int(loss_dict_new['n_initialized_protos'])
+            
+            print(f"  Epoch {epoch} - total_loss: {total_loss_val:.6f}, "
+                  f"n_confident: {n_confident}, "
+                  f"n_protos: {n_protos}")
+            
+            # 清理张量
+            del feat_new, logits_new, pred_new, label_new, is_labelled_new, loss_dict_new
     
     print("✓ All tests passed!")
 
@@ -131,56 +142,80 @@ def example_usage():
     for epoch in range(3):
         print(f"\nEpoch {epoch + 1}:")
 
-        # 1. 用 no_grad + 新的 features 更新原型
+        # **STEP 1**: 原型更新阶段 - 使用完全独立的张量和no_grad
+        torch.manual_seed(42 + epoch * 100)  # 每个epoch不同的随机种子
         with torch.no_grad():
-            decoder_features_ng = torch.randn(batch_size, feat_dim, H, W, D, device=device)
-            segmentation_logits_ng = torch.randn(batch_size, num_classes + 1, H, W, D, device=device)
-            predictions_ng = torch.softmax(segmentation_logits_ng, dim=1)
-            ground_truth_ng = torch.randint(0, num_classes + 1, (batch_size, 1, H, W, D), device=device)
-            is_labelled_ng = torch.tensor([True, True, False, False], device=device)
+            # 创建第一套完全独立的张量（仅用于原型更新）
+            update_features = torch.randn(batch_size, feat_dim, H, W, D, device=device)
+            update_logits = torch.randn(batch_size, num_classes + 1, H, W, D, device=device)
+            update_predictions = torch.softmax(update_logits, dim=1)
+            update_labels = torch.randint(0, num_classes + 1, (batch_size, 1, H, W, D), device=device)
+            update_is_labelled = torch.tensor([True, True, False, False], device=device)
+            
+            # 仅更新原型，不计算梯度
             _ = proto_mem(
-                feat=decoder_features_ng,
-                label=ground_truth_ng,
-                pred=predictions_ng,
-                is_labelled=is_labelled_ng,
+                feat=update_features,
+                label=update_labels,
+                pred=update_predictions,
+                is_labelled=update_is_labelled,
                 epoch_idx=epoch
             )
 
-        # 2. 用全新 features 做 loss 反向传播
-        decoder_features = torch.randn(batch_size, feat_dim, H, W, D, device=device, requires_grad=True)
-        segmentation_logits = torch.randn(batch_size, num_classes + 1, H, W, D, device=device)
-        predictions = torch.softmax(segmentation_logits, dim=1)
-        ground_truth = torch.randint(0, num_classes + 1, (batch_size, 1, H, W, D), device=device)
-        is_labelled = torch.tensor([True, True, False, False], device=device)
+        # **STEP 2**: 损失计算阶段 - 使用第二套完全独立的张量
+        torch.manual_seed(100 + epoch * 200)  # 另一个随机种子确保完全不同的数据
+        
+        # 创建第二套完全独立的张量（用于梯度计算）
+        loss_features = torch.randn(batch_size, feat_dim, H, W, D, device=device, requires_grad=True)
+        loss_logits = torch.randn(batch_size, num_classes + 1, H, W, D, device=device)
+        loss_predictions = torch.softmax(loss_logits, dim=1)
+        loss_labels = torch.randint(0, num_classes + 1, (batch_size, 1, H, W, D), device=device)
+        loss_is_labelled = torch.tensor([True, True, False, False], device=device)
 
+        # 计算损失（不更新原型）
         proto_losses = proto_mem(
-            feat=decoder_features,
-            label=ground_truth,
-            pred=predictions,
-            is_labelled=is_labelled,
-            epoch_idx=None  # 不更新原型
+            feat=loss_features,
+            label=loss_labels,
+            pred=loss_predictions,
+            is_labelled=loss_is_labelled,
+            epoch_idx=None  # 关键：不更新原型
         )
 
-        # detach打印
-        intra_loss = proto_losses['intra'].detach().item()
-        inter_loss = proto_losses['inter'].detach().item()
-        total_proto_loss = proto_losses['total'].detach().item()
+        # **STEP 3**: 安全地提取损失值（在backward之前detach）
+        intra_loss_val = proto_losses['intra'].detach().item()
+        inter_loss_val = proto_losses['inter'].detach().item()
+        total_proto_loss_val = proto_losses['total'].detach().item()
         n_confident = int(proto_losses['n_confident_pixels'])
         n_protos = int(proto_losses['n_initialized_protos'])
-        print(f"  Intra-class loss: {intra_loss:.4f}")
-        print(f"  Inter-class loss: {inter_loss:.4f}")
-        print(f"  Total proto loss: {total_proto_loss:.4f}")
+        
+        print(f"  Intra-class loss: {intra_loss_val:.4f}")
+        print(f"  Inter-class loss: {inter_loss_val:.4f}")
+        print(f"  Total proto loss: {total_proto_loss_val:.4f}")
         print(f"  Confident pixels: {n_confident}")
         print(f"  Initialized prototypes: {n_protos}")
 
-        dice_loss = torch.randn(1, device=device, requires_grad=True)
-        consistency_loss = torch.randn(1, device=device, requires_grad=True)
+        # **STEP 4**: 创建完全独立的其他损失项
+        dice_loss = torch.randn(1, device=device, requires_grad=True) * 0.1
+        consistency_loss = torch.randn(1, device=device, requires_grad=True) * 0.1
+        
+        # 组合总损失
         total_loss = dice_loss + 0.1 * consistency_loss + 0.5 * proto_losses['total']
-        print(f"  Combined total loss: {total_loss.detach().item():.4f}")
+        total_loss_val = total_loss.detach().item()
+        print(f"  Combined total loss: {total_loss_val:.4f}")
 
+        # **STEP 5**: 执行backward
         total_loss.backward()
         print(f"  Gradients computed successfully")
 
+        # **STEP 6**: 清理计算图（可选，但有助于内存管理）
+        del total_loss, proto_losses, dice_loss, consistency_loss
+        del loss_features, loss_logits, loss_predictions, loss_labels, loss_is_labelled
+        del update_features, update_logits, update_predictions, update_labels, update_is_labelled
+        
+        # 显式触发垃圾回收
+        if device == 'cuda':
+            torch.cuda.empty_cache()
+
+        # **STEP 7**: 原型统计（使用no_grad确保安全）
         if (epoch + 1) % 2 == 0:
             with torch.no_grad():
                 stats = proto_mem.get_prototype_statistics()
@@ -190,6 +225,9 @@ def example_usage():
                 if 'mean_pairwise_distance' in stats:
                     mean_dist = float(stats['mean_pairwise_distance'])
                     print(f"  Mean prototype distance: {mean_dist:.4f}")
+    
+    print("\n✓ Multi-epoch training completed successfully!")
+
 
 def integration_example():
     """Example of integrating PrototypeMemory into existing training framework."""
