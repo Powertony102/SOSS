@@ -233,22 +233,25 @@ class corf(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(feat_dim, feat_dim)
         )
-    def forward(self, input, with_hcc=False, with_selector=False, region_features=None):
+    def forward(self, input):
+        """前向传播，返回分割结果和特征
+        
+        Args:
+            input: 输入图像张量
+            
+        Returns:
+            tuple: (outputs, embedding)
+                - outputs: 分割预测结果
+                - embedding: 编码器提取的特征
+        """
         features1 = self.encoder1(input)
         features2 = self.encoder2(input)
-        out_seg1, embedding1 = self.decoder1(features1, with_feature=True)
-        out_seg2, embedding2 = self.decoder2(features2, with_feature=True)
-        output_dict = {
-            'seg1': out_seg1,
-            'seg2': out_seg2,
-            'embedding1': embedding1,
-            'embedding2': embedding2
-        }
-        if with_hcc:
-            output_dict['features1'] = features1
-            output_dict['features2'] = features2
-        if not with_hcc:
-            return out_seg1, out_seg2, embedding1, embedding2
-        else:
-            return output_dict
+        
+        out_seg1 = self.decoder1(features1)
+        out_seg2 = self.decoder2(features2)
+        
+        outputs = (out_seg1 + out_seg2) / 2.0  # 两个分支的平均预测
+        embedding = features1[-1]  # 使用encoder1的最后一层特征作为embedding
+        
+        return outputs, embedding
     
