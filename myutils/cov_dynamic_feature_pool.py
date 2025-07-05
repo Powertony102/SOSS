@@ -46,7 +46,7 @@ class CovarianceDynamicFeaturePool:
         # 新增：Two-Phase k-means相关参数
         self.use_two_phase_kmeans = False
         self.num_classes = 2  # 默认二分类
-        self.prototypes_per_class = None  # 每类子-prototype数量
+        # self.prototypes_per_class = None  # 每类子-prototype数量
         
         # 是否已完成DFP构建
         self.dfps_built = False
@@ -360,24 +360,14 @@ class CovarianceDynamicFeaturePool:
         
         Args:
             num_classes: 类别数量
-            prototypes_per_class: 每个类别的子-prototype数量，如果为None则平均分配
+            # prototypes_per_class: 每个类别的子-prototype数量，如果为None则平均分配
         """
         self.use_two_phase_kmeans = True
         self.num_classes = num_classes
-        
-        if prototypes_per_class is None:
-            # 平均分配DFP给各个类别
-            base_count = self.num_dfp // num_classes
-            remainder = self.num_dfp % num_classes
-            self.prototypes_per_class = [base_count + (1 if i < remainder else 0) 
-                                       for i in range(num_classes)]
-        else:
-            if len(prototypes_per_class) != num_classes:
-                raise ValueError(f"prototypes_per_class length ({len(prototypes_per_class)}) != num_classes ({num_classes})")
-            if sum(prototypes_per_class) != self.num_dfp:
-                raise ValueError(f"Sum of prototypes_per_class ({sum(prototypes_per_class)}) != num_dfp ({self.num_dfp})")
-            self.prototypes_per_class = prototypes_per_class
-        
+        # 删除prototypes_per_class相关逻辑，直接平均分配
+        base_count = self.num_dfp // num_classes
+        remainder = self.num_dfp % num_classes
+        self.prototypes_per_class = [base_count + (1 if i < remainder else 0) for i in range(num_classes)]
         logging.info(f"Enabled Two-Phase k-means: {num_classes} classes, "
                     f"prototypes per class: {self.prototypes_per_class}")
     
@@ -418,31 +408,22 @@ class CovarianceDynamicFeaturePool:
         for class_id in range(self.num_classes):
             # 找到当前类别的特征（只使用有标签的特征）
             class_mask = (all_labels == class_id)
+            num_prototypes = self.prototypes_per_class[class_id]
             if not class_mask.any():
                 logging.warning(f"No features found for class {class_id}, using random initialization")
-                # 随机初始化该类的中心
-                num_prototypes = self.prototypes_per_class[class_id]
                 random_centers = torch.randn(num_prototypes, D, device=self.device) * 0.1
                 all_centers.extend([center for center in random_centers])
                 dfp_idx += num_prototypes
                 continue
-            
             class_features = F_global[class_mask]  # [N_class, D]
-            num_prototypes = self.prototypes_per_class[class_id]
-            
             logging.info(f"Class {class_id}: {class_features.shape[0]} features, {num_prototypes} prototypes")
-            
-            # 对当前类别做spherical k-means
             class_centers = self._spherical_kmeans(class_features, num_prototypes, 
                                                  max_iterations=50, tolerance=1e-4)
             all_centers.extend([center for center in class_centers])
             dfp_idx += num_prototypes
-        
         # Phase 2: 使用所有子-prototype作为初始中心，进行全局优化
         initial_centers = torch.stack(all_centers, dim=0)  # [num_dfp, D]
-        
         logging.info(f"Phase 2: Global optimization with {initial_centers.shape[0]} initial centers")
-        
         # 使用初始中心进行全局度量学习优化
         success = self._optimize_dfps_with_initial_centers(F_global, initial_centers, 
                                                          max_iterations, learning_rate)
@@ -680,6 +661,8 @@ class CovarianceDynamicFeaturePool:
         # 计算与每个DFP中心的L2距离 (批量GPU计算)
         # features_gpu: [batch_size, D], dfp_centers: [num_dfp, D]
         # 使用广播计算距离矩阵
+        if self.dfp_centers is None:
+            raise RuntimeError("DFP centers have not been computed. Call _compute_dfp_centers() after building DFPs.")
         distances = torch.norm(features_gpu.unsqueeze(1) - self.dfp_centers.unsqueeze(0), dim=2)  # [batch_size, num_dfp]
         
         # 选择距离最小的DFP
@@ -706,21 +689,20 @@ class CovarianceDynamicFeaturePool:
         result_features = []
         for i in range(batch_size):
             dfp_idx = dfp_indices[i].item()
-            
-            if 0 <= dfp_idx < self.num_dfp and self.dfps[dfp_idx] is not None and self.dfps[dfp_idx].shape[0] > 0:
-                dfp_features = self.dfps[dfp_idx]  # [num_features, D] GPU张量
-                
-                # 如果特征过多，随机采样 (GPU上进行)
-                if dfp_features.shape[0] > max_features_per_dfp:
-                    # 使用torch在GPU上进行随机采样
-                    indices = torch.randperm(dfp_features.shape[0], device=self.device)[:max_features_per_dfp]
-                    sampled_features = dfp_features[indices]
+            dfp_obj = self.dfps[dfp_idx] if 0 <= dfp_idx < self.num_dfp else None
+            if isinstance(dfp_obj, torch.Tensor):
+                if dfp_obj.shape[0] > 0:
+                    dfp_features = dfp_obj  # [num_features, D] GPU张量
+                    # 如果特征过多，随机采样 (GPU上进行)
+                    if dfp_features.shape[0] > max_features_per_dfp:
+                        indices = torch.randperm(dfp_features.shape[0], device=self.device)[:max_features_per_dfp]
+                        sampled_features = dfp_features[indices]
+                    else:
+                        sampled_features = dfp_features
+                    features_tensor = sampled_features.to(device)
+                    result_features.append(features_tensor)
                 else:
-                    sampled_features = dfp_features
-                
-                # 转移到目标设备
-                features_tensor = sampled_features.to(device)
-                result_features.append(features_tensor)
+                    result_features.append(None)
             else:
                 result_features.append(None)
         
