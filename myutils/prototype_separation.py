@@ -380,14 +380,14 @@ class PrototypeMemory(nn.Module):
         stats = {
             'num_initialized': init_mask.sum().item(),
             'total_classes': self.num_classes,
-            'update_counts': self.update_count[init_mask].cpu().numpy() if init_mask.any() else [],
+            'update_counts': self.update_count[init_mask].detach().cpu().numpy() if init_mask.any() else [],
             'last_update_epoch': self.last_update_epoch.item(),
         }
         
         if init_mask.any():
             prototypes = self.prototypes[init_mask]
             stats.update({
-                'prototype_norms': torch.norm(prototypes, p=2, dim=1).cpu().numpy(),
+                'prototype_norms': torch.norm(prototypes, p=2, dim=1).detach().cpu().numpy(),
                 'mean_prototype_norm': torch.norm(prototypes, p=2, dim=1).mean().item(),
             })
             
@@ -397,7 +397,7 @@ class PrototypeMemory(nn.Module):
                 proto_j = prototypes.unsqueeze(0)
                 distances = torch.norm(proto_i - proto_j, p=2, dim=2)
                 mask = torch.triu(torch.ones_like(distances, dtype=torch.bool), diagonal=1)
-                stats['pairwise_distances'] = distances[mask].cpu().numpy()
+                stats['pairwise_distances'] = distances[mask].detach().cpu().numpy()
                 stats['mean_pairwise_distance'] = distances[mask].mean().item()
         
         return stats 
