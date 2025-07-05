@@ -152,31 +152,39 @@ def example_usage():
             epoch_idx=epoch
         )
         
-        # Print loss components
-        print(f"  Intra-class loss: {proto_losses['intra'].item():.4f}")
-        print(f"  Inter-class loss: {proto_losses['inter'].item():.4f}")
-        print(f"  Total proto loss: {proto_losses['total'].item():.4f}")
-        print(f"  Confident pixels: {proto_losses['n_confident_pixels']}")
-        print(f"  Initialized prototypes: {proto_losses['n_initialized_protos']}")
+        # Detach all loss/statistics for printing/logging BEFORE backward
+        intra_loss = proto_losses['intra'].detach().item()
+        inter_loss = proto_losses['inter'].detach().item()
+        total_proto_loss = proto_losses['total'].detach().item()
+        n_confident = int(proto_losses['n_confident_pixels'])
+        n_protos = int(proto_losses['n_initialized_protos'])
+        
+        # Print loss components (all detached)
+        print(f"  Intra-class loss: {intra_loss:.4f}")
+        print(f"  Inter-class loss: {inter_loss:.4f}")
+        print(f"  Total proto loss: {total_proto_loss:.4f}")
+        print(f"  Confident pixels: {n_confident}")
+        print(f"  Initialized prototypes: {n_protos}")
         
         # Simulate total loss (combine with other losses)
         dice_loss = torch.randn(1, device=device, requires_grad=True)
         consistency_loss = torch.randn(1, device=device, requires_grad=True)
-        
         total_loss = dice_loss + 0.1 * consistency_loss + 0.5 * proto_losses['total']
-        
-        print(f"  Combined total loss: {total_loss.item():.4f}")
+        print(f"  Combined total loss: {total_loss.detach().item():.4f}")
         
         # Backward pass
         total_loss.backward()
         print(f"  Gradients computed successfully")
         
-        # Show prototype statistics every few epochs
+        # Show prototype statistics every few epochs (detach all values)
         if (epoch + 1) % 2 == 0:
             stats = proto_mem.get_prototype_statistics()
-            print(f"  Prototype stats: {stats['num_initialized']}/{stats['total_classes']} initialized")
+            num_init = int(stats['num_initialized'])
+            total_cls = int(stats['total_classes'])
+            print(f"  Prototype stats: {num_init}/{total_cls} initialized")
             if 'mean_pairwise_distance' in stats:
-                print(f"  Mean prototype distance: {stats['mean_pairwise_distance']:.4f}")
+                mean_dist = float(stats['mean_pairwise_distance'])
+                print(f"  Mean prototype distance: {mean_dist:.4f}")
 
 
 def integration_example():
