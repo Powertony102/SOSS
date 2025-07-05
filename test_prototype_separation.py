@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""
+Unit tests and example usage for PrototypeMemory module.
+"""
+
+import torch
+import numpy as np
+from myutils.prototype_separation import PrototypeMemory
+
+
+def test_prototype_memory():
+    """Unit test for PrototypeMemory module."""
+    print("Running PrototypeMemory unit tests...")
+    
+    # Test parameters
+    batch_size = 2
+    feat_dim = 64
+    num_classes = 2  # Foreground classes (excluding background)
+    H, W, D = 32, 32, 16
+    K = num_classes + 1  # Include background class
+    
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"Using device: {device}")
+    
+    # Create module
+    proto_mem = PrototypeMemory(
+        num_classes=num_classes,
+        feat_dim=feat_dim,
+        proto_momentum=0.9,
+        conf_thresh=0.7,
+        lambda_intra=1.0,
+        lambda_inter=0.1,
+        margin_m=1.0,
+        device=device
+    ).to(device)
+    
+    # Create test data
+    torch.manual_seed(42)
+    feat = torch.randn(batch_size, feat_dim, H, W, D, device=device, requires_grad=True)
+    
+    # Create realistic predictions (softmax)
+    logits = torch.randn(batch_size, K, H, W, D, device=device)
+    pred = torch.softmax(logits, dim=1)
+    
+    # Create labels (with some background pixels)
+    label = torch.randint(0, K, (batch_size, 1, H, W, D), device=device)
+    
+    # Mark first sample as labelled, second as unlabelled
+    is_labelled = torch.tensor([True, False], device=device)
+    
+    print(f"Input shapes:")
+    print(f"  feat: {feat.shape}")
+    print(f"  pred: {pred.shape}")
+    print(f"  label: {label.shape}")
+    print(f"  is_labelled: {is_labelled.shape}")
+    
+    # Test forward pass
+    loss_dict = proto_mem(feat, label, pred, is_labelled, epoch_idx=0)
+    
+    print(f"\nLoss computation:")
+    for key, value in loss_dict.items():
+        if isinstance(value, torch.Tensor):
+            print(f"  {key}: {value.item():.6f}")
+        else:
+            print(f"  {key}: {value}")
+    
+    # Test backward pass
+    total_loss = loss_dict['total']
+    print(f"\nBackward pass test:")
+    print(f"  total_loss.requires_grad: {total_loss.requires_grad}")
+    
+    if total_loss.requires_grad:
+        total_loss.backward()
+        print(f"  feat.grad is not None: {feat.grad is not None}")
+        if feat.grad is not None:
+            print(f"  feat.grad.norm(): {feat.grad.norm().item():.6f}")
+    
+    # Test prototype statistics
+    stats = proto_mem.get_prototype_statistics()
+    print(f"\nPrototype statistics:")
+    for key, value in stats.items():
+        if isinstance(value, (list, np.ndarray)) and len(value) > 5:
+            print(f"  {key}: array of length {len(value)}")
+        else:
+            print(f"  {key}: {value}")
+    
+    # Test multiple epochs
+    print(f"\nMulti-epoch test:")
+    for epoch in range(1, 4):
+        with torch.no_grad():
+            # Create new test data
+            feat_new = torch.randn(batch_size, feat_dim, H, W, D, device=device)
+            logits_new = torch.randn(batch_size, K, H, W, D, device=device)
+            pred_new = torch.softmax(logits_new, dim=1)
+            
+            loss_dict_new = proto_mem(feat_new, label, pred_new, is_labelled, epoch_idx=epoch)
+            print(f"  Epoch {epoch} - total_loss: {loss_dict_new['total'].item():.6f}, "
+                  f"n_confident: {loss_dict_new['n_confident_pixels']}, "
+                  f"n_protos: {loss_dict_new['n_initialized_protos']}")
+    
+    print("✓ All tests passed!")
+
+
+def example_usage():
+    """Example usage in training loop."""
+    print("\n" + "="*60)
+    print("Example Usage in Training Loop")
+    print("="*60)
+    
+    # Model setup
+    num_classes = 2  # Binary segmentation (excluding background)
+    feat_dim = 128
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    # Initialize prototype memory
+    proto_mem = PrototypeMemory(
+        num_classes=num_classes,
+        feat_dim=feat_dim,
+        proto_momentum=0.9,
+        conf_thresh=0.8,
+        lambda_intra=0.5,
+        lambda_inter=0.1,
+        margin_m=1.0,
+        device=device
+    ).to(device)
+    
+    print(f"Initialized PrototypeMemory with {num_classes} classes on {device}")
+    
+    # Simulate training data
+    batch_size = 4
+    H, W, D = 64, 64, 32
+    
+    # Example integration in training step
+    for epoch in range(3):
+        print(f"\nEpoch {epoch + 1}:")
+        
+        # Simulate model outputs
+        decoder_features = torch.randn(batch_size, feat_dim, H, W, D, device=device, requires_grad=True)
+        segmentation_logits = torch.randn(batch_size, num_classes + 1, H, W, D, device=device)
+        predictions = torch.softmax(segmentation_logits, dim=1)
+        
+        # Ground truth (first 2 samples labelled, last 2 unlabelled)
+        ground_truth = torch.randint(0, num_classes + 1, (batch_size, 1, H, W, D), device=device)
+        is_labelled = torch.tensor([True, True, False, False], device=device)
+        
+        # Compute prototype losses
+        proto_losses = proto_mem(
+            feat=decoder_features,
+            label=ground_truth,
+            pred=predictions,
+            is_labelled=is_labelled,
+            epoch_idx=epoch
+        )
+        
+        # Print loss components
+        print(f"  Intra-class loss: {proto_losses['intra'].item():.4f}")
+        print(f"  Inter-class loss: {proto_losses['inter'].item():.4f}")
+        print(f"  Total proto loss: {proto_losses['total'].item():.4f}")
+        print(f"  Confident pixels: {proto_losses['n_confident_pixels']}")
+        print(f"  Initialized prototypes: {proto_losses['n_initialized_protos']}")
+        
+        # Simulate total loss (combine with other losses)
+        dice_loss = torch.randn(1, device=device, requires_grad=True)
+        consistency_loss = torch.randn(1, device=device, requires_grad=True)
+        
+        total_loss = dice_loss + 0.1 * consistency_loss + 0.5 * proto_losses['total']
+        
+        print(f"  Combined total loss: {total_loss.item():.4f}")
+        
+        # Backward pass
+        total_loss.backward()
+        print(f"  Gradients computed successfully")
+        
+        # Show prototype statistics every few epochs
+        if (epoch + 1) % 2 == 0:
+            stats = proto_mem.get_prototype_statistics()
+            print(f"  Prototype stats: {stats['num_initialized']}/{stats['total_classes']} initialized")
+            if 'mean_pairwise_distance' in stats:
+                print(f"  Mean prototype distance: {stats['mean_pairwise_distance']:.4f}")
+
+
+def integration_example():
+    """Example of integrating PrototypeMemory into existing training framework."""
+    print("\n" + "="*60)
+    print("Integration Example with Existing Framework")
+    print("="*60)
+    
+    # 模拟您当前的训练框架中的集成
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    # 初始化原型内存模块
+    proto_memory = PrototypeMemory(
+        num_classes=2,  # LA数据集的前景类别数 (不含背景)
+        feat_dim=64,    # 与您的embedding_dim保持一致
+        proto_momentum=0.95,    # 较高的动量用于稳定更新
+        conf_thresh=0.85,       # 高置信度阈值
+        lambda_intra=0.3,       # 类内紧致性权重
+        lambda_inter=0.1,       # 类间分离权重
+        margin_m=1.5,           # 分离边界
+        device=device
+    ).to(device)
+    
+    print("PrototypeMemory配置:")
+    print(f"  num_classes: {proto_memory.num_classes}")
+    print(f"  feat_dim: {proto_memory.feat_dim}")
+    print(f"  proto_momentum: {proto_memory.proto_momentum}")
+    print(f"  conf_thresh: {proto_memory.conf_thresh}")
+    print(f"  lambda_intra: {proto_memory.lambda_intra}")
+    print(f"  lambda_inter: {proto_memory.lambda_inter}")
+    print(f"  margin_m: {proto_memory.margin_m}")
+    
+    # 在训练循环中的使用示例
+    print(f"\n在训练循环中集成PrototypeMemory:")
+    print("```python")
+    print("# 在train_cov_dfp_3d.py中的集成示例")
+    print("def train_with_prototype_separation(model, sampled_batch, optimizer, ...):")
+    print("    # ... 现有的前向传播代码 ...")
+    print("    outputs_v, outputs_a, embedding_v, embedding_a = model(volume_batch)")
+    print("    ")
+    print("    # 获取解码器特征 (假设是embedding_v)")
+    print("    decoder_features = embedding_v  # (B, C, H, W, D)")
+    print("    predictions = torch.softmax(outputs_v, dim=1)  # (B, K, H, W, D)")
+    print("    ")
+    print("    # 计算原型分离损失")
+    print("    proto_losses = proto_memory(")
+    print("        feat=decoder_features,")
+    print("        label=label_batch,")
+    print("        pred=predictions,")
+    print("        is_labelled=is_labelled_mask,")
+    print("        epoch_idx=current_epoch")
+    print("    )")
+    print("    ")
+    print("    # 合并到总损失中")
+    print("    total_loss = (args.lamda * loss_s + ")
+    print("                  lambda_c * loss_c + ")
+    print("                  args.lambda_hcc * loss_hcc +")
+    print("                  0.5 * proto_losses['total'])  # 添加原型损失")
+    print("```")
+
+
+if __name__ == "__main__":
+    test_prototype_memory()
+    example_usage()
+    integration_example() 
