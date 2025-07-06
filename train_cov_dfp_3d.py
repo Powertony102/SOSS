@@ -324,8 +324,8 @@ def train_with_dfp(model, sampled_batch, optimizer, consistency_criterion, dice_
         logging.info('Iteration %d : loss : %03f, loss_s: %03f, loss_c: %03f, loss_anchor: %03f, loss_prototype: %03f' % (
             iter_num, total_loss, loss_s, loss_c, loss_anchor, loss_prototype))
     else:
-        logging.info('Iteration %d : loss : %03f, loss_s: %03f, loss_c: %03f, loss_anchor: %03f' % (
-            iter_num, total_loss, loss_s, loss_c, loss_anchor))
+    logging.info('Iteration %d : loss : %03f, loss_s: %03f, loss_c: %03f, loss_anchor: %03f' % (
+        iter_num, total_loss, loss_s, loss_c, loss_anchor))
     
     result = {
         'total_loss': total_loss.item(),
@@ -445,8 +445,8 @@ def train_without_dfp(model, sampled_batch, optimizer, consistency_criterion, di
         logging.info('Iteration %d : loss : %03f, loss_s: %03f, loss_c: %03f, loss_prototype: %03f' % (
             iter_num, total_loss, loss_s, loss_c, loss_prototype))
     else:
-        logging.info('Iteration %d : loss : %03f, loss_s: %03f, loss_c: %03f' % (
-            iter_num, total_loss, loss_s, loss_c))
+    logging.info('Iteration %d : loss : %03f, loss_s: %03f, loss_c: %03f' % (
+        iter_num, total_loss, loss_s, loss_c))
     
     result = {
         'total_loss': total_loss.item(),

@@ -21,7 +21,7 @@ def test_corn_model_dimension():
     # 测试参数
     embedding_dim = 64  # 期望的embedding维度
     batch_size = 2
-    spatial_size = (8, 8, 8)
+    spatial_size = (112, 112, 80)  # 增大空间尺寸，避免下采样后尺寸过小
     
     print(f"期望的embedding维度: {embedding_dim}")
     print(f"批次大小: {batch_size}")
@@ -99,7 +99,7 @@ def test_corn2d_model_dimension():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     embedding_dim = 64
     batch_size = 2
-    spatial_size = (8, 8)
+    spatial_size = (128, 128)  # 增大空间尺寸，避免下采样后尺寸过小
     
     print(f"期望的embedding维度: {embedding_dim}")
     print(f"批次大小: {batch_size}")
@@ -160,7 +160,7 @@ def test_different_embedding_dimensions():
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     batch_size = 1
-    spatial_size = (4, 4, 4)
+    spatial_size = (128, 128, 128)  # 增大空间尺寸，避免下采样后尺寸过小
     
     # 测试不同的embedding维度
     test_dimensions = [16, 32, 64, 128]
