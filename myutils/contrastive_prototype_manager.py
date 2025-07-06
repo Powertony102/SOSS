@@ -25,14 +25,15 @@ class ContrastivePrototypeManager:
         
         Args:
             num_classes: 类别数量
-            feature_dim: 特征维度
+            feature_dim: 特征维度（预期维度，实际维度会在第一次使用时自动检测）
             elements_per_class: 每类保留的特征数量
             confidence_threshold: 置信度阈值
             use_learned_selector: 是否使用学习的特征选择器
             device: 设备
         """
         self.num_classes = num_classes
-        self.feature_dim = feature_dim
+        self.feature_dim = feature_dim  # 预期维度
+        self.actual_feature_dim = None  # 实际检测到的维度
         self.elements_per_class = elements_per_class
         self.confidence_threshold = confidence_threshold
         self.use_learned_selector = use_learned_selector
@@ -42,28 +43,52 @@ class ContrastivePrototypeManager:
         self.memory = [None] * num_classes
         self.initialized = False
         
-        # 学习的特征选择器（可选）
-        if use_learned_selector:
+        # 学习的特征选择器（可选）- 延迟初始化
+        self.feature_selectors = None
+        self.memory_selectors = None
+        self._selectors_initialized = False
+    
+    def _detect_feature_dim_and_init_selectors(self, features: torch.Tensor):
+        """
+        检测实际特征维度并初始化选择器
+        
+        Args:
+            features: 特征张量，用于检测维度
+        """
+        # 检测实际特征维度
+        if features.dim() == 5:  # [N, C, H, W, D]
+            actual_dim = features.shape[1]
+        else:  # [N*H*W*D, C]
+            actual_dim = features.shape[-1]
+        
+        self.actual_feature_dim = actual_dim
+        
+        # 如果维度不匹配，打印警告
+        if self.feature_dim != actual_dim:
+            print(f"⚠️  警告: 预期特征维度 {self.feature_dim} 与实际特征维度 {actual_dim} 不匹配。使用实际维度 {actual_dim}。")
+        
+        # 初始化选择器（如果需要）
+        if self.use_learned_selector and not self._selectors_initialized:
             self.feature_selectors = nn.ModuleDict()
             self.memory_selectors = nn.ModuleDict()
             
-            for c in range(num_classes):
+            for c in range(self.num_classes):
                 # 当前特征选择器
                 self.feature_selectors[f'contrastive_class_selector_{c}'] = nn.Sequential(
-                    nn.Linear(feature_dim, feature_dim // 4),
+                    nn.Linear(actual_dim, max(actual_dim // 4, 1)),  # 确保至少为1
                     nn.ReLU(),
-                    nn.Linear(feature_dim // 4, 1)
-                ).to(device)
+                    nn.Linear(max(actual_dim // 4, 1), 1)
+                ).to(self.device)
                 
                 # 内存特征选择器
                 self.memory_selectors[f'contrastive_class_selector_memory{c}'] = nn.Sequential(
-                    nn.Linear(feature_dim, feature_dim // 4),
+                    nn.Linear(actual_dim, max(actual_dim // 4, 1)),  # 确保至少为1
                     nn.ReLU(),
-                    nn.Linear(feature_dim // 4, 1)
-                ).to(device)
-        else:
-            self.feature_selectors = None
-            self.memory_selectors = None
+                    nn.Linear(max(actual_dim // 4, 1), 1)
+                ).to(self.device)
+            
+            self._selectors_initialized = True
+            print(f"✅ 特征选择器已初始化，使用实际特征维度: {actual_dim}")
     
     def extract_high_quality_features(self, features: torch.Tensor, 
                                     predictions: torch.Tensor, 
@@ -81,6 +106,9 @@ class ContrastivePrototypeManager:
         Returns:
             high_quality_features: 每类高质量特征的字典
         """
+        # 检测特征维度并初始化选择器
+        self._detect_feature_dim_and_init_selectors(features)
+        
         # 确保输入维度正确
         if features.dim() == 5:  # [N, C, H, W, D]
             N, C, H, W, D = features.shape
@@ -429,7 +457,7 @@ class ContrastivePrototypeManager:
     
     def get_selectors(self):
         """获取选择器模块（如果使用学习的选择器）"""
-        if self.use_learned_selector:
+        if self.use_learned_selector and self._selectors_initialized:
             return self.feature_selectors, self.memory_selectors
         else:
             return None, None 
