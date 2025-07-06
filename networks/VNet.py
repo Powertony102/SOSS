@@ -252,20 +252,24 @@ class corf(nn.Module):
         self.encoder2 = Encoder(n_channels, n_classes, n_filters, normalization, has_dropout, has_residual,)
         self.decoder1 = Decoder(n_channels, n_classes, n_filters, normalization, has_dropout, has_residual, 0)
         self.decoder2 = Decoder(n_channels, n_classes, n_filters, normalization, has_dropout, has_residual, 1)
+        
+        # Projection heads: 将n_filters维特征投影到feat_dim维
         self.projection_head1 = nn.Sequential(
             nn.Linear(n_filters, feat_dim),
             nn.BatchNorm1d(feat_dim),
             nn.ReLU(inplace=True),
             nn.Linear(feat_dim, feat_dim)
         )
-        self.prediction_head1 = nn.Sequential(
-            nn.Linear(feat_dim, feat_dim),
+        self.projection_head2 = nn.Sequential(
+            nn.Linear(n_filters, feat_dim),
             nn.BatchNorm1d(feat_dim),
             nn.ReLU(inplace=True),
             nn.Linear(feat_dim, feat_dim)
         )
-        self.projection_head2 = nn.Sequential(
-            nn.Linear(n_filters, feat_dim),
+        
+        # Prediction heads: 用于对比学习（可选）
+        self.prediction_head1 = nn.Sequential(
+            nn.Linear(feat_dim, feat_dim),
             nn.BatchNorm1d(feat_dim),
             nn.ReLU(inplace=True),
             nn.Linear(feat_dim, feat_dim)
@@ -280,8 +284,22 @@ class corf(nn.Module):
     def forward(self, input, with_hcc=False):
         features1 = self.encoder1(input)
         features2 = self.encoder2(input)
-        out_seg1, embedding1 = self.decoder1(features1, with_feature=True)
-        out_seg2, embedding2 = self.decoder2(features2, with_feature=True)
+        out_seg1, embedding1_raw = self.decoder1(features1, with_feature=True)
+        out_seg2, embedding2_raw = self.decoder2(features2, with_feature=True)
+        
+        # 将原始特征投影到期望的维度
+        # embedding1_raw: [B, n_filters, H, W, D] -> [B*H*W*D, n_filters]
+        B, C, H, W, D = embedding1_raw.shape
+        embedding1_flat = embedding1_raw.permute(0, 2, 3, 4, 1).contiguous().view(-1, C)
+        embedding2_flat = embedding2_raw.permute(0, 2, 3, 4, 1).contiguous().view(-1, C)
+        
+        # 通过projection heads投影到feat_dim
+        embedding1 = self.projection_head1(embedding1_flat)  # [B*H*W*D, feat_dim]
+        embedding2 = self.projection_head2(embedding2_flat)  # [B*H*W*D, feat_dim]
+        
+        # 重塑回原始空间维度
+        embedding1 = embedding1.view(B, H, W, D, self.feat_dim).permute(0, 4, 1, 2, 3)  # [B, feat_dim, H, W, D]
+        embedding2 = embedding2.view(B, H, W, D, self.feat_dim).permute(0, 4, 1, 2, 3)  # [B, feat_dim, H, W, D]
         
         # 为了保持向后兼容性，根据参数返回不同格式
         if with_hcc:
@@ -557,8 +575,22 @@ class corf2d(nn.Module):
     def forward(self, input, with_hcc=False):
         features1 = self.encoder1(input)
         features2 = self.encoder2(input)
-        out_seg1, embedding1 = self.decoder1(features1, with_feature=True)
-        out_seg2, embedding2 = self.decoder2(features2, with_feature=True)
+        out_seg1, embedding1_raw = self.decoder1(features1, with_feature=True)
+        out_seg2, embedding2_raw = self.decoder2(features2, with_feature=True)
+        
+        # 将原始特征投影到期望的维度
+        # embedding1_raw: [B, n_filters, H, W] -> [B*H*W, n_filters]
+        B, C, H, W = embedding1_raw.shape
+        embedding1_flat = embedding1_raw.permute(0, 2, 3, 1).contiguous().view(-1, C)
+        embedding2_flat = embedding2_raw.permute(0, 2, 3, 1).contiguous().view(-1, C)
+        
+        # 通过projection heads投影到feat_dim
+        embedding1 = self.projection_head1(embedding1_flat)  # [B*H*W, feat_dim]
+        embedding2 = self.projection_head2(embedding2_flat)  # [B*H*W, feat_dim]
+        
+        # 重塑回原始空间维度
+        embedding1 = embedding1.view(B, H, W, self.feat_dim).permute(0, 3, 1, 2)  # [B, feat_dim, H, W]
+        embedding2 = embedding2.view(B, H, W, self.feat_dim).permute(0, 3, 1, 2)  # [B, feat_dim, H, W]
         
         # 为了保持向后兼容性，根据参数返回不同格式
         if with_hcc:

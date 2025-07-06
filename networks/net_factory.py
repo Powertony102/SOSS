@@ -22,13 +22,13 @@ def net_factory(net_type="unet", in_chns=1, class_num=2, mode="train", **kwargs)
     elif net_type == "vnet" and mode == "test":
         net = VNet(n_channels=in_chns, n_classes=class_num, normalization='batchnorm', has_dropout=False).cuda()
     elif net_type == "corn" and mode == "train":
-        net = corf(n_channels=in_chns, n_classes=class_num, normalization='batchnorm', has_dropout=True).cuda()
+        net = corf(n_channels=in_chns, n_classes=class_num, normalization='batchnorm', has_dropout=True, **kwargs).cuda()
     elif net_type == "corn" and mode == "test":
-        net = corf(n_channels=in_chns, n_classes=class_num, normalization='batchnorm', has_dropout=False).cuda()
+        net = corf(n_channels=in_chns, n_classes=class_num, normalization='batchnorm', has_dropout=False, **kwargs).cuda()
     elif net_type == "corn2d" and mode == "train":
-        net = corf2d(n_channels=in_chns, n_classes=class_num, normalization='batchnorm', has_dropout=True).cuda()
+        net = corf2d(n_channels=in_chns, n_classes=class_num, normalization='batchnorm', has_dropout=True, **kwargs).cuda()
     elif net_type == "corn2d" and mode == "test":
-        net = corf2d(n_channels=in_chns, n_classes=class_num, normalization='batchnorm', has_dropout=False).cuda()
+        net = corf2d(n_channels=in_chns, n_classes=class_num, normalization='batchnorm', has_dropout=False, **kwargs).cuda()
     else:
         raise ValueError(f"Unsupported network type: {net_type} with mode: {mode}")
     
